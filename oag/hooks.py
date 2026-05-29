@@ -17,6 +17,7 @@ HOOK_EVENTS = [
     "session_start",
     "session_end",
     "compact_triggered",
+    "query_complete",
 ]
 
 HookHandler = Callable[[dict], "HookResult"]

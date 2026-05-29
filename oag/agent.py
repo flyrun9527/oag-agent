@@ -12,6 +12,7 @@ from .events import (
     ToolCallEvent, event_to_dict,
 )
 from .harness import Harness
+from .retry import call_llm_with_retry
 
 
 class SessionStore:
@@ -171,7 +172,8 @@ class Agent:
                 if compacted:
                     yield CompactEvent()
 
-            response = self.client.chat.completions.create(
+            response = call_llm_with_retry(
+                self.client,
                 model=self.model,
                 messages=messages,
                 tools=tools if tools else None,

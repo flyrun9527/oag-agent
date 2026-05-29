@@ -6,6 +6,8 @@ from typing import Any, TYPE_CHECKING
 
 from openai import OpenAI
 
+from .retry import call_llm_with_retry
+
 if TYPE_CHECKING:
     from .harness import Harness
 
@@ -91,7 +93,8 @@ class Worker:
         tool_calls_log: list[dict] = []
 
         for _ in range(self.max_turns):
-            response = self.client.chat.completions.create(
+            response = call_llm_with_retry(
+                self.client,
                 model=self.model,
                 messages=messages,
                 tools=tools if tools else None,

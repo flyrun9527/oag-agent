@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from .retry import call_llm_with_retry
+
 COMPACT_PROMPT = """\
 请将以下对话历史浓缩为一段简洁的摘要，保留关键信息：
 - 用户询问了什么
@@ -50,12 +52,23 @@ class ContextManager:
         self.client = llm_client
         self.model = model
         self.context_window = context_window
+        self.micro_threshold = int(context_window * 0.60)
         self.compact_threshold = int(context_window * 0.75)
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         token_count = count_messages_tokens(messages)
+
+        if token_count >= self.micro_threshold and token_count < self.compact_threshold:
+            messages = self._micro_compact(messages)
+            if count_messages_tokens(messages) < self.micro_threshold:
+                return messages, True
+
         if token_count < self.compact_threshold:
             return messages, False
+
+        messages = self._micro_compact(messages)
+        if count_messages_tokens(messages) < self.compact_threshold:
+            return messages, True
 
         if len(messages) <= 4:
             return messages, False
@@ -85,6 +98,21 @@ class ContextManager:
 
         return compacted, True
 
+    def _micro_compact(self, messages: list[dict]) -> list[str]:
+        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+        protect = set(tool_indices[-3:]) if len(tool_indices) >= 3 else set(tool_indices)
+
+        for i in tool_indices:
+            if i in protect:
+                continue
+            content = messages[i].get("content", "")
+            if len(content) > 500:
+                messages[i] = {
+                    **messages[i],
+                    "content": content[:200] + "\n[... 结果已压缩]",
+                }
+        return messages
+
     def _summarize(self, messages: list[dict]) -> str:
         history_parts = []
         for msg in messages:
@@ -102,7 +130,8 @@ class ContextManager:
         prompt = COMPACT_PROMPT.format(history=history_text)
 
         try:
-            response = self.client.chat.completions.create(
+            response = call_llm_with_retry(
+                self.client, max_retries=3,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,

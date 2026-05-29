@@ -87,6 +87,34 @@ def _derive_tool_meta(name: str, registry: FunctionRegistry) -> ToolMeta:
     return ToolMeta(name=name)
 
 
+def _default_stop_hook(context: dict) -> HookResult:
+    messages = context.get("messages", [])
+    user_question = context.get("user_question", "")
+
+    last_assistant = ""
+    tool_errors = []
+    for m in reversed(messages):
+        if m.get("role") == "assistant" and m.get("content"):
+            last_assistant = m["content"]
+            break
+        if m.get("role") == "tool":
+            content = m.get("content", "")
+            if '"error"' in content or "不存在" in content:
+                tool_errors.append(content[:100])
+
+    issues = []
+    if not last_assistant:
+        issues.append("未生成最终回答（可能工具调用轮次用尽）")
+    elif len(last_assistant) < 20:
+        issues.append("回复过短，可能未完整回答")
+    if tool_errors:
+        issues.append(f"有工具执行出错未处理: {'; '.join(tool_errors[:2])}")
+
+    if issues:
+        return HookResult(action="pause", reason="; ".join(issues))
+    return HookResult()
+
+
 class Harness:
     def __init__(self, ontology: Ontology, store: Store,
                  registry: FunctionRegistry, llm_client: OpenAI,
@@ -108,6 +136,10 @@ class Harness:
         if self.config.enable_audit:
             self.hooks.register("post_tool_call", audit_log_hook)
         self.hooks.register("post_tool_call", business_review_hook)
+        self.hooks.register("query_complete", _default_stop_hook)
+
+    def register_stop_hook(self, handler):
+        self.hooks.register("query_complete", handler)
 
     def get_tool_meta(self, tool_name: str) -> ToolMeta:
         return _derive_tool_meta(tool_name, self.registry)
@@ -363,33 +395,17 @@ class Harness:
         return self.context_mgr.maybe_compact(messages)
 
     def run_stop_check(self, user_question: str, messages: list[dict]) -> str | None:
-        last_assistant = ""
-        tool_errors = []
-        for m in reversed(messages):
-            if m.get("role") == "assistant" and m.get("content"):
-                last_assistant = m["content"]
-                break
-            if m.get("role") == "tool":
-                content = m.get("content", "")
-                if '"error"' in content or "不存在" in content:
-                    tool_errors.append(content[:100])
-
-        issues = []
-        if not last_assistant:
-            issues.append("未生成最终回答（可能工具调用轮次用尽）")
-        elif len(last_assistant) < 20:
-            issues.append("回复过短，可能未完整回答")
-        if tool_errors:
-            issues.append(f"有工具执行出错未处理: {'; '.join(tool_errors[:2])}")
-
-        if not issues:
-            return None
-
-        return (
-            f"[系统自检] 请检查你的回复是否完整回答了用户问题: \"{user_question}\"\n"
-            f"发现的问题: {'; '.join(issues)}\n"
-            f"如果回复已完整，直接说'已确认回复完整'即可。否则请补充。"
-        )
+        result = self.hooks.fire("query_complete", {
+            "messages": messages,
+            "user_question": user_question,
+        })
+        if result.action == "pause" and result.reason:
+            return (
+                f"[系统自检] 请检查你的回复是否完整回答了用户问题: \"{user_question}\"\n"
+                f"发现的问题: {result.reason}\n"
+                f"如果回复已完整，直接说'已确认回复完整'即可。否则请补充。"
+            )
+        return None
 
 
 class _ToolExecutor:
