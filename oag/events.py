@@ -91,6 +91,14 @@ class ConfirmationEvent(Event):
     reason: str = ""
 
 
+@dataclass
+class QuestionEvent(Event):
+    type: str = "question"
+    question: str = ""
+    options: list[dict] = field(default_factory=list)
+    multi_select: bool = False
+
+
 def event_to_dict(event: Event) -> dict:
     result = {"type": event.type}
     for k, v in event.__dict__.items():

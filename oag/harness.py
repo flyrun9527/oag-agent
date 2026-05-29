@@ -64,6 +64,7 @@ BUILTIN_TOOLS_META: dict[str, ToolMeta] = {
     "search": ToolMeta(name="search", category="query"),
     "start_workflow": ToolMeta(name="start_workflow", category="action"),
     "summarize_progress": ToolMeta(name="summarize_progress", category="inspect"),
+    "ask_user": ToolMeta(name="ask_user", category="ask"),
 }
 
 
@@ -148,6 +149,16 @@ class Harness:
 
         if tool_name == "summarize_progress":
             return self._summarize_progress(messages)
+
+        if tool_name == "ask_user":
+            question = args.get("question", "")
+            options = args.get("options", [])
+            return ToolResult(
+                content=json.dumps({"question": question, "options": options}, ensure_ascii=False),
+                blocked=True,
+                block_reason=question,
+                needs_confirmation=True,
+            )
 
         if tool_meta.is_read_only:
             cache_key = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
@@ -335,6 +346,7 @@ class Harness:
         if self.ontology.workflows:
             parts.append("- 工作流: 使用 start_workflow 启动和跟踪工作流进度")
         parts.append("- 进度总结: 使用 summarize_progress 回顾对话进展")
+        parts.append("- 用户决策: 遇到多种可行方案或需要用户确认偏好时，使用 ask_user 提问")
         parts.append("- 并行执行: 当有多个相互独立的子任务可以同时进行时，使用 dispatch_workers 并行执行以提高效率")
 
         if domain_context:
@@ -885,6 +897,40 @@ class _ToolExecutor:
                 "parameters": {
                     "type": "object",
                     "properties": {},
+                },
+            },
+        })
+
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": "向用户提问以收集决策。当存在多种可行方案、需要确认优先级或参数时使用。用户回答后会作为工具结果返回",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "要问用户的问题",
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string", "description": "选项标签"},
+                                    "description": {"type": "string", "description": "选项说明"},
+                                },
+                                "required": ["label"],
+                            },
+                            "description": "可选项列表（2-5个）",
+                        },
+                        "multi_select": {
+                            "type": "boolean",
+                            "description": "是否允许多选（默认单选）",
+                        },
+                    },
+                    "required": ["question", "options"],
                 },
             },
         })

@@ -8,8 +8,8 @@ from typing import Any, Generator
 from openai import OpenAI
 
 from .events import (
-    CompactEvent, ConfirmationEvent, Event, TextEvent, ToolCallEvent,
-    event_to_dict,
+    CompactEvent, ConfirmationEvent, Event, QuestionEvent, TextEvent,
+    ToolCallEvent, event_to_dict,
 )
 from .harness import Harness
 
@@ -86,7 +86,8 @@ class Agent:
     def has_pending(self, session_id: str) -> bool:
         return session_id in self._pending
 
-    def confirm_tool(self, session_id: str, approved: bool) -> Generator[Event, None, None]:
+    def confirm_tool(self, session_id: str, approved: bool,
+                     answer: str | None = None) -> Generator[Event, None, None]:
         pending = self._pending.pop(session_id, None)
         if not pending:
             yield TextEvent(content="没有待确认的操作。")
@@ -106,6 +107,17 @@ class Agent:
             })
             self.sessions.save(session_id, messages)
             yield TextEvent(content=f"已取消 {pending.tool_name} 的执行。")
+            return
+
+        if pending.tool_name == "ask_user" and answer:
+            tool_result = json.dumps({"answer": answer}, ensure_ascii=False)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": pending.tool_call_id,
+                "content": tool_result,
+            })
+            yield from self._continue_loop(messages, session_id)
+            self.sessions.save(session_id, messages)
             return
 
         result = self.harness.execute_tool(
@@ -220,11 +232,18 @@ class Agent:
                         tool_call_id=tc.id,
                         messages=messages,
                     )
-                    yield ConfirmationEvent(
-                        tool_name=tc.function.name,
-                        args=args,
-                        reason=result.block_reason,
-                    )
+                    if tc.function.name == "ask_user":
+                        yield QuestionEvent(
+                            question=args.get("question", ""),
+                            options=args.get("options", []),
+                            multi_select=args.get("multi_select", False),
+                        )
+                    else:
+                        yield ConfirmationEvent(
+                            tool_name=tc.function.name,
+                            args=args,
+                            reason=result.block_reason,
+                        )
                     return
 
                 preview_len = 5000 if tc.function.name == "dispatch_workers" else 200

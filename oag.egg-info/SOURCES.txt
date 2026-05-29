@@ -2,15 +2,12 @@ pyproject.toml
 oag/__init__.py
 oag/agent.py
 oag/analytics.py
-oag/api.py
-oag/cli.py
 oag/context.py
 oag/events.py
 oag/executor.py
 oag/harness.py
 oag/hooks.py
 oag/loader.py
-oag/orchestrator.py
 oag/pipeline_types.py
 oag/planner.py
 oag/registry.py
@@ -22,6 +19,5 @@ oag/worker.py
 oag.egg-info/PKG-INFO
 oag.egg-info/SOURCES.txt
 oag.egg-info/dependency_links.txt
-oag.egg-info/entry_points.txt
 oag.egg-info/requires.txt
 oag.egg-info/top_level.txt
