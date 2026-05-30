@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass
@@ -21,40 +20,6 @@ class ToolCallEvent(Event):
     name: str = ""
     args: dict = field(default_factory=dict)
     result: str = ""
-    step_id: int | None = None
-
-
-@dataclass
-class PlanEvent(Event):
-    type: str = "plan"
-    reasoning: str = ""
-    steps: list[dict] = field(default_factory=list)
-
-
-@dataclass
-class StepStartEvent(Event):
-    type: str = "step_start"
-    step_id: int = 0
-    target: str = ""
-    purpose: str = ""
-
-
-@dataclass
-class StepDoneEvent(Event):
-    type: str = "step_done"
-    step_id: int = 0
-    target: str = ""
-    status: str = ""
-    note: str = ""
-
-
-@dataclass
-class ReviewEvent(Event):
-    type: str = "review"
-    step_id: int = 0
-    passed: bool = True
-    issues: list[str] = field(default_factory=list)
-    suggestion: str = ""
 
 
 @dataclass
@@ -62,18 +27,6 @@ class CompactEvent(Event):
     type: str = "compact"
     before_tokens: int = 0
     after_tokens: int = 0
-
-
-@dataclass
-class PlanningEvent(Event):
-    type: str = "planning"
-    content: str = ""
-
-
-@dataclass
-class SynthesizingEvent(Event):
-    type: str = "synthesizing"
-    content: str = ""
 
 
 @dataclass

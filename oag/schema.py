@@ -14,11 +14,22 @@ class PropertyDef(BaseModel):
     default: Any = None
 
 
+class ObjectConstraint(BaseModel):
+    when: dict[str, Any]
+    excluded_functions: list[str] = []
+    reason: str = ""
+
+
 class ObjectTypeDef(BaseModel):
     kind: str = "entity"  # entity / rule_table / lookup_table / config
     description: str = ""
     summary: str = ""
     properties: dict[str, PropertyDef] = {}
+    status_transitions: dict[str, list[str]] = {}
+    excluded_functions: list[str] = []
+    constraints: list[ObjectConstraint] = []
+    data_source: str = ""  # external_api / agent_generated / human_confirmed
+    mutability: str = ""  # read_only / append_only / mutable
 
 
 class LinkDef(BaseModel):
@@ -26,12 +37,33 @@ class LinkDef(BaseModel):
     target: str
     join: dict[str, str]
     description: str = ""
+    link_type: str = "contains"  # contains / causal / enables / prevents
+    cardinality: str = ""  # 1..1 / 1..n / 0..n / 0..1
 
 
 class FunctionParam(BaseModel):
     type: str = "str"
     description: str = ""
     default: Any = None
+
+
+class Precondition(BaseModel):
+    object: str
+    field: str
+    operator: str = "eq"  # eq / ne / in / exists / not_exists
+    value: Any = None
+
+
+class Effect(BaseModel):
+    object: str
+    field: str
+    set_to: Any
+
+
+class TemporalConstraint(BaseModel):
+    when: dict[str, str] = {}
+    deadline: str = ""
+    sla: str = ""
 
 
 class FunctionDef(BaseModel):
@@ -44,6 +76,9 @@ class FunctionDef(BaseModel):
     function_type: str = ""  # business / lookup / get
     writes_to: list[str] = []
     involves_objects: list[str] = []
+    preconditions: list[Precondition] = []
+    effects: list[Effect] = []
+    temporal_constraints: list[TemporalConstraint] = []
 
 
 class RuleCondition(BaseModel):
@@ -67,6 +102,7 @@ class WorkflowStep(BaseModel):
     function: str = ""
     description: str = ""
     next: str | dict[str, str] = ""
+    sla: str = ""
 
 
 class WorkflowDef(BaseModel):
@@ -108,23 +144,9 @@ class Ontology(BaseModel):
             result.append(ch.lower())
         return "".join(result)
 
-    def get_entity_objects(self) -> dict[str, ObjectTypeDef]:
-        return {k: v for k, v in self.objects.items() if v.kind == "entity"}
-
-    def get_rule_tables(self) -> dict[str, ObjectTypeDef]:
-        return {k: v for k, v in self.objects.items() if v.kind == "rule_table"}
-
-    def get_lookup_tables(self) -> dict[str, ObjectTypeDef]:
-        return {k: v for k, v in self.objects.items() if v.kind == "lookup_table"}
-
     def get_rules_for_object(self, object_type: str) -> dict[str, RuleDef]:
         return {
             k: v for k, v in self.rules.items()
             if object_type in v.applies_to
         }
 
-    def get_workflow_by_trigger(self, trigger: str) -> WorkflowDef | None:
-        for wf in self.workflows.values():
-            if trigger in wf.trigger:
-                return wf
-        return None
