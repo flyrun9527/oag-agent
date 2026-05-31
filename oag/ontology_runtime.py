@@ -9,7 +9,7 @@ from .registry import FunctionRegistry
 from .rules import RuleEngine
 from .schema import Ontology
 from .store import Store
-from .tool_registry import ToolDef, ToolRegistry
+from .tool_registry import ToolDef, ToolPolicy, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,8 @@ class OntologyRuntime:
     # System prompt
     # ------------------------------------------------------------------
 
-    def build_system_prompt(self, domain_context: str = "") -> str:
+    def build_system_prompt(self, domain_context: str = "",
+                            progressive_context: bool = False) -> str:
         parts = []
         parts.append(f"你是 {self.ontology.name} 领域的智能助手。")
         if self.ontology.description:
@@ -97,7 +98,10 @@ class OntologyRuntime:
         if fn_lines:
             parts.append("\n## 可用函数")
             parts.extend(fn_lines)
-            parts.append("(首次调用函数时系统会自动注入该函数的详细规则、前置条件和约束)")
+            if progressive_context:
+                parts.append("(首次调用函数时系统会自动注入该函数的详细规则、前置条件和约束)")
+            else:
+                parts.append("(函数、对象的完整规则和约束已在本提示后文全量提供)")
 
         parts.append("\n## 工具使用规则")
         parts.append("- 查询数据: 使用 query/count/query_links")
@@ -122,6 +126,112 @@ class OntologyRuntime:
             parts.append(f"\n{domain_context}")
 
         return "\n".join(parts)
+
+    def build_full_context(self) -> str:
+        parts: list[str] = []
+
+        fn_parts = self._build_all_function_details()
+        if fn_parts:
+            parts.append("## 函数完整定义")
+            parts.extend(fn_parts)
+
+        obj_parts = self._build_all_object_details()
+        if obj_parts:
+            parts.append("## 对象完整定义")
+            parts.extend(obj_parts)
+
+        return "\n\n".join(parts)
+
+    def _build_all_function_details(self) -> list[str]:
+        details: list[str] = []
+        for fn_name, fdef in self.registry.list_functions():
+            if not fdef:
+                continue
+
+            lines = [f"### 函数: {fn_name}"]
+            if fdef.summary:
+                lines.append(f"摘要: {fdef.summary.strip()}")
+            if fdef.description:
+                lines.append(f"说明: {fdef.description.strip()}")
+            if fdef.hint:
+                lines.append(f"规则: {fdef.hint.strip()}")
+            if fdef.params:
+                params = ", ".join(
+                    f"{p}({d.type}): {d.description}"
+                    for p, d in fdef.params.items()
+                )
+                lines.append(f"参数: {params}")
+            if fdef.preconditions:
+                reqs = "; ".join(
+                    f"{p.object}.{p.field} {p.operator} {p.value}"
+                    for p in fdef.preconditions
+                )
+                lines.append(f"前置条件: {reqs}")
+            if fdef.effects:
+                effs = "; ".join(
+                    f"{e.object}.{e.field} -> {e.set_to}"
+                    for e in fdef.effects
+                )
+                lines.append(f"执行效果: {effs}")
+            if fdef.temporal_constraints:
+                slas = "; ".join(
+                    f"{tc.sla}({tc.deadline})" if tc.deadline else tc.sla
+                    for tc in fdef.temporal_constraints
+                    if tc.sla
+                )
+                if slas:
+                    lines.append(f"时间约束: {slas}")
+            if fdef.writes_to:
+                lines.append(f"写入对象: {', '.join(fdef.writes_to)}")
+            if fdef.involves_objects:
+                lines.append(f"涉及对象: {', '.join(fdef.involves_objects)}")
+
+            details.append("\n".join(lines))
+        return details
+
+    def _build_all_object_details(self) -> list[str]:
+        details: list[str] = []
+        for obj_name, obj_def in self.ontology.objects.items():
+            lines = [f"### 对象: {obj_name}"]
+            if obj_def.summary:
+                lines.append(f"摘要: {obj_def.summary.strip()}")
+            if obj_def.description:
+                lines.append(f"说明: {obj_def.description.strip()}")
+            if obj_def.mutability:
+                lines.append(f"可变性: {obj_def.mutability}")
+            if obj_def.data_source:
+                lines.append(f"数据来源: {obj_def.data_source}")
+            if obj_def.excluded_functions:
+                lines.append(f"不可调用: {', '.join(obj_def.excluded_functions)}")
+            if obj_def.status_transitions:
+                flows = "; ".join(
+                    f"{k}->{'|'.join(v)}"
+                    for k, v in obj_def.status_transitions.items()
+                )
+                lines.append(f"状态流转: {flows}")
+            for c in obj_def.constraints:
+                cond = ", ".join(f"{ck}={cv}" for ck, cv in c.when.items())
+                lines.append(
+                    f"约束({cond}): 不可调用 {', '.join(c.excluded_functions)}; 原因: {c.reason}"
+                )
+            if obj_def.properties:
+                props = ", ".join(
+                    f"{p}({d.type}{'*' if d.required else ''}): {d.description}"
+                    for p, d in obj_def.properties.items()
+                )
+                lines.append(f"属性: {props}")
+
+            rules = self.ontology.get_rules_for_object(obj_name)
+            if rules:
+                lines.append(
+                    "适用规则: " + ", ".join(
+                        f"{rname}({rdef.rule_type})"
+                        for rname, rdef in rules.items()
+                    )
+                )
+
+            details.append("\n".join(lines))
+        return details
 
     # ------------------------------------------------------------------
     # Constraint checking
@@ -605,6 +715,14 @@ class OntologyRuntime:
             parameters={"type": "object", "properties": {"operation": {"type": "string", "enum": ["create", "update", "delete"], "description": "操作类型"}, "object_type": {"type": "string", "enum": obj_types, "description": "对象类型"}, "object_id": {"type": "string", "description": "对象ID（update/delete必填）"}, "data": {"type": "object", "description": "要写入的字段（create/update时提供）"}}, "required": ["operation", "object_type"]},
             handler=lambda args: data.execute("mutate", args),
             category="action", is_read_only=False, requires_confirmation=True, max_result_chars=2000,
+            policy=ToolPolicy(
+                read_only=False,
+                requires_confirmation=True,
+                concurrency_safe=False,
+                worker_allowed=False,
+                idempotent=False,
+                destructive=True,
+            ),
         ))
 
         tools.register(ToolDef(
@@ -623,6 +741,13 @@ class OntologyRuntime:
                 parameters={"type": "object", "properties": {"workflow_name": {"type": "string", "enum": workflow_names, "description": "工作流名称"}, "advance_to_step": {"type": "string", "description": "推进到指定步骤名（可选）"}}, "required": ["workflow_name"]},
                 handler=self.start_workflow,
                 category="action",
+                policy=ToolPolicy(
+                    read_only=False,
+                    requires_confirmation=False,
+                    concurrency_safe=False,
+                    worker_allowed=False,
+                    idempotent=False,
+                ),
             ))
 
         has_sla = any(
@@ -682,4 +807,12 @@ class OntologyRuntime:
                 category="action" if has_writes else "query",
                 is_read_only=not has_writes,
                 requires_confirmation=has_writes or is_business,
+                policy=ToolPolicy(
+                    read_only=not has_writes,
+                    requires_confirmation=has_writes or is_business,
+                    concurrency_safe=not has_writes,
+                    worker_allowed=not (has_writes or is_business),
+                    idempotent=not has_writes,
+                    destructive=has_writes or is_business,
+                ),
             ))

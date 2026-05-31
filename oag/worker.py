@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 from openai import OpenAI
 
 from .retry import call_llm_with_retry
+from .runtime import ToolUseContext
 
 if TYPE_CHECKING:
     from .harness import Harness
@@ -123,7 +124,11 @@ class Worker:
 
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments)
-                result = self.harness.execute_tool(tc.function.name, args, confirmed=True)
+                result = self.harness.execute_tool(
+                    tc.function.name,
+                    args,
+                    context=ToolUseContext(source="worker", confirmed=False),
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

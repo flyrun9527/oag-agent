@@ -52,6 +52,13 @@ class QuestionEvent(Event):
     multi_select: bool = False
 
 
+@dataclass
+class DebugEvent(Event):
+    type: str = "debug"
+    stage: str = ""
+    content: str = ""
+
+
 def event_to_dict(event: Event) -> dict:
     result = {"type": event.type}
     for k, v in event.__dict__.items():

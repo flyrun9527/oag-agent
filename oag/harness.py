@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from openai import OpenAI
 
-from .context import ContextManager, truncate_tool_result
+from .context import ContextManager
 from .data_executor import DataExecutor
 from .hooks import AuditLog, HookRegistry, HookResult, audit_log_hook, business_review_hook, write_confirmation_hook
 from .ontology_runtime import OntologyRuntime
-from .tool_registry import ToolDef, ToolRegistry
+from .runtime import ToolUseContext, TraceRecorder
+from .tool_registry import ToolDef, ToolPolicy, ToolRegistry
+from .tool_pipeline import ToolExecutionPipeline, ToolResult
 from .worker import run_workers_parallel
 from .registry import FunctionRegistry
 from .rules import RuleEngine
@@ -22,32 +23,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ToolResult:
-    content: str
-    raw_content: str = ""
-    truncated: bool = False
-    blocked: bool = False
-    block_reason: str = ""
-    needs_confirmation: bool = False
-    context_note: str = ""
-
-
-@dataclass
 class HarnessConfig:
     max_turns: int = 10
     max_tool_result_chars: int = 5000
     enable_audit: bool = True
     enable_write_confirmation: bool = True
+    enable_progressive_context: bool = False
 
 
 def _default_stop_hook(context: dict) -> HookResult:
     messages = context.get("messages", [])
 
-    last_assistant = ""
+    last_assistant: str | None = None
     tool_errors = []
     for m in reversed(messages):
-        if m.get("role") == "assistant" and m.get("content"):
-            last_assistant = m["content"]
+        if m.get("role") == "assistant":
+            last_assistant = m.get("content") or ""
             break
         if m.get("role") == "tool":
             content = m.get("content", "")
@@ -57,7 +48,7 @@ def _default_stop_hook(context: dict) -> HookResult:
     incomplete_signals = ["正在进行", "下一步", "接下来", "即将", "稍后", "继续调用", "我将调用", "我将"]
 
     issues = []
-    if not last_assistant:
+    if last_assistant is None or not last_assistant.strip():
         issues.append("未生成最终回答（可能工具调用轮次用尽）")
     elif len(last_assistant) < 20:
         issues.append("回复过短，可能未完整回答")
@@ -86,6 +77,17 @@ class Harness:
         self.data = DataExecutor(store, registry)
         self.tools = ToolRegistry()
         self._cache: dict[str, ToolResult] = {}
+        self.trace = TraceRecorder()
+        self.tool_pipeline = ToolExecutionPipeline(
+            tools=self.tools,
+            ontology_runtime=self.ont,
+            hooks=self.hooks,
+            audit=self.audit,
+            cache=self._cache,
+            trace=self.trace,
+            progressive_context_enabled=lambda: self.config.enable_progressive_context,
+            set_current_messages=self._set_current_messages,
+        )
 
         self.ont.register_tools(self.tools, self.data)
         self._register_runtime_tools()
@@ -116,6 +118,13 @@ class Harness:
             }, "required": ["question", "options"]},
             handler=lambda args: json.dumps({"question": args.get("question", ""), "options": args.get("options", [])}, ensure_ascii=False),
             category="ask", requires_confirmation=True,
+            policy=ToolPolicy(
+                read_only=True,
+                requires_confirmation=True,
+                concurrency_safe=False,
+                worker_allowed=False,
+                idempotent=False,
+            ),
         ))
 
         self.tools.register(ToolDef(
@@ -127,6 +136,13 @@ class Harness:
             }, "required": ["tasks"]},
             handler=lambda args: self._dispatch_workers_handler(args),
             category="action",
+            policy=ToolPolicy(
+                read_only=False,
+                requires_confirmation=False,
+                concurrency_safe=False,
+                worker_allowed=False,
+                idempotent=False,
+            ),
         ))
 
     def register_stop_hook(self, handler):
@@ -135,89 +151,24 @@ class Harness:
     def execute_tool(self, tool_name: str, args: dict,
                      session_id: str = "",
                      confirmed: bool = False,
-                     messages: list[dict] | None = None) -> ToolResult:
-        tool = self.tools.get(tool_name)
-        if not tool:
-            return ToolResult(content=json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False))
+                     messages: list[dict] | None = None,
+                     context: ToolUseContext | None = None) -> ToolResult:
+        context = self._normalize_tool_context(session_id, confirmed, messages, context)
+        return self.tool_pipeline.execute(tool_name, args, context)
 
-        if tool_name == "mutate" and not confirmed:
-            pre_check = self.ont.validate_mutate(args)
-            if pre_check:
-                return ToolResult(content=pre_check)
-
-        if not confirmed:
-            pre_result = self.hooks.fire("pre_tool_call", {
-                "tool_name": tool_name,
-                "args": args,
-                "tool_meta": tool,
-                "session_id": session_id,
-            })
-            if pre_result.action == "block":
-                return ToolResult(
-                    content=json.dumps({"blocked": True, "reason": pre_result.reason}, ensure_ascii=False),
-                    blocked=True, block_reason=pre_result.reason,
-                )
-            if pre_result.action == "pause":
-                return ToolResult(
-                    content=json.dumps({"paused": True, "reason": pre_result.reason}, ensure_ascii=False),
-                    blocked=True, block_reason=pre_result.reason, needs_confirmation=True,
-                )
-
-        if tool.requires_confirmation and not confirmed and tool_name == "ask_user":
-            raw_result = tool.handler(args)
-            return ToolResult(
-                content=raw_result, blocked=True,
-                block_reason=args.get("question", ""), needs_confirmation=True,
-            )
-
-        if tool.is_read_only:
-            cache_key = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
-            if cache_key in self._cache:
-                return self._cache[cache_key]
-
-        constraint_error = self.ont.check_constraints(tool_name, args)
-        if constraint_error:
-            return ToolResult(content=constraint_error)
-
-        if tool_name == "summarize_progress":
-            self._current_messages = messages
-        raw_result = tool.handler(args)
-
-        fn_context = self.ont.build_context_for_tool(tool_name) or ""
-        result_context = self.ont.build_context_from_result(raw_result) or ""
-        context_parts = [p for p in [fn_context, result_context] if p]
-        context_note = "\n\n".join(context_parts)
-
-        truncated_result = truncate_tool_result(raw_result, tool.max_result_chars)
-        was_truncated = len(truncated_result) < len(raw_result)
-
-        post_result = self.hooks.fire("post_tool_call", {
-            "tool_name": tool_name,
-            "args": args,
-            "tool_meta": tool,
-            "result": raw_result,
-            "session_id": session_id,
-            "hook_event": "post_tool_call",
-            "audit_log": self.audit,
-        })
-
-        review_notes = post_result.data.get("review_notes", [])
-        if review_notes:
-            truncated_result += "\n\n[⚠ 系统校验提示]\n" + "\n".join(f"- {n}" for n in review_notes)
-
-        result = ToolResult(
-            content=truncated_result, raw_content=raw_result, truncated=was_truncated,
-            context_note=context_note,
+    def _normalize_tool_context(self, session_id: str, confirmed: bool,
+                                messages: list[dict] | None,
+                                context: ToolUseContext | None) -> ToolUseContext:
+        if context:
+            return context
+        return ToolUseContext(
+            session_id=session_id,
+            messages=messages,
+            confirmed=confirmed,
         )
 
-        if tool.is_read_only:
-            cache_key = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
-            self._cache[cache_key] = result
-
-        if tool_name == "mutate" and not result.blocked:
-            self._cache.clear()
-
-        return result
+    def _set_current_messages(self, messages: list[dict] | None):
+        self._current_messages = messages
 
     def _dispatch_workers_handler(self, args: dict) -> str:
         tasks = args.get("tasks", [])
@@ -267,11 +218,17 @@ class Harness:
         return self.tools.build_tools()
 
     def build_system_prompt(self, domain_context: str = "") -> str:
-        return self.ont.build_system_prompt(domain_context)
+        prompt = self.ont.build_system_prompt(
+            domain_context,
+            progressive_context=self.config.enable_progressive_context,
+        )
+        if not self.config.enable_progressive_context:
+            prompt += "\n\n" + self.ont.build_full_context()
+        return prompt
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         messages, compacted = self.context_mgr.maybe_compact(messages)
-        if compacted:
+        if compacted and self.config.enable_progressive_context:
             self.ont.reset_context_shown()
         return messages, compacted
 

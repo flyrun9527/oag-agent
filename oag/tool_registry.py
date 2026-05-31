@@ -5,6 +5,16 @@ from typing import Any, Callable
 
 
 @dataclass
+class ToolPolicy:
+    read_only: bool = True
+    requires_confirmation: bool = False
+    concurrency_safe: bool = True
+    worker_allowed: bool = True
+    idempotent: bool = True
+    destructive: bool = False
+
+
+@dataclass
 class ToolDef:
     name: str
     description: str
@@ -14,6 +24,21 @@ class ToolDef:
     is_read_only: bool = True
     requires_confirmation: bool = False
     max_result_chars: int = 5000
+    policy: ToolPolicy | None = None
+
+    def __post_init__(self):
+        if self.policy is None:
+            self.policy = ToolPolicy(
+                read_only=self.is_read_only,
+                requires_confirmation=self.requires_confirmation,
+                concurrency_safe=self.is_read_only,
+                worker_allowed=self.is_read_only,
+                idempotent=self.is_read_only,
+                destructive=not self.is_read_only,
+            )
+        else:
+            self.is_read_only = self.policy.read_only
+            self.requires_confirmation = self.policy.requires_confirmation
 
 
 class ToolRegistry:
