@@ -95,6 +95,29 @@ def make_tool_call(name: str, tool_id: str = "tool_1") -> SimpleNamespace:
     )
 
 
+def make_stream_chunk(*, content: str | None = None,
+                      reasoning: str | None = None,
+                      tool_call=None) -> SimpleNamespace:
+    delta = SimpleNamespace(
+        content=content,
+        reasoning_content=reasoning,
+        tool_calls=[tool_call] if tool_call else None,
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+
+def make_tool_delta(index: int, *,
+                    tool_id: str | None = None,
+                    name: str | None = None,
+                    arguments: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        index=index,
+        id=tool_id,
+        type="function" if tool_id else None,
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
 def test_prompt_uses_full_context():
     harness = make_harness()
 
@@ -270,6 +293,69 @@ def test_query_loop_emits_reasoning_event_without_persisting_it(monkeypatch):
     assert [event.type for event in events] == ["debug", "debug", "reasoning", "text"]
     assert events[2].content == "Internal reasoning trace."
     assert all("Internal reasoning trace." not in msg.get("content", "") for msg in messages)
+
+
+def test_query_loop_streams_reasoning_and_text_without_duplicate_final_text(monkeypatch):
+    harness = make_harness()
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        assert kwargs["stream"] is True
+        return iter([
+            make_stream_chunk(reasoning="Think "),
+            make_stream_chunk(reasoning="step."),
+            make_stream_chunk(content="This is a complete "),
+            make_stream_chunk(content="final answer for the user."),
+        ])
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Question?"}]
+    state = RunState(messages=messages, session_id="s1", user_question="Question?")
+
+    events = list(loop.run(state))
+
+    assert [event.type for event in events] == ["debug", "reasoning", "reasoning", "text", "text", "debug"]
+    assert [event.content for event in events if event.type == "reasoning"] == ["Think ", "step."]
+    assert [event.content for event in events if event.type == "text"] == [
+        "This is a complete ",
+        "final answer for the user.",
+    ]
+    assert messages[-1] == {
+        "role": "assistant",
+        "content": "This is a complete final answer for the user.",
+    }
+
+
+def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
+    harness = make_harness()
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        return iter([
+            make_stream_chunk(tool_call=make_tool_delta(0, tool_id="tool_1", name="lookup_asset", arguments='{"asset')),
+            make_stream_chunk(tool_call=make_tool_delta(0, arguments='_id":"A1"}')),
+        ])
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Question?"}]
+    state = RunState(messages=messages, session_id="s1", user_question="Question?")
+
+    events = list(loop.run(state))
+
+    assert [event.type for event in events[:3]] == ["debug", "debug", "tool_call"]
+    assert events[2].name == "lookup_asset"
+    assert '"asset_id": "A1"' in events[2].result
+    assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
 
 
 def test_confirmation_flow_handles_missing_pending():

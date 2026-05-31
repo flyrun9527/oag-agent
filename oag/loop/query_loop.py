@@ -7,6 +7,7 @@ QueryLoop 负责把消息和工具发给模型、记录调试事件、执行模�
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Generator
 
 from openai import OpenAI
@@ -74,15 +75,16 @@ class QueryLoop:
                 messages=messages,
                 tools=tools if tools else None,
                 temperature=0.1,
+                stream=True,
             )
-            msg = response.choices[0].message
-
-            yield self._build_response_debug_event(msg)
-            if reasoning := self._extract_reasoning_content(msg):
-                yield ReasoningEvent(content=reasoning)
+            msg = yield from self._consume_llm_response(response)
 
             if not msg.tool_calls:
-                yield from self._handle_final_response(state, msg.content or "")
+                yield from self._handle_final_response(
+                    state,
+                    msg.content or "",
+                    already_streamed=getattr(msg, "content_streamed", False),
+                )
                 return
 
             # OpenAI tool protocol 要求先保存 assistant 的 tool_calls envelope，
@@ -173,10 +175,12 @@ class QueryLoop:
             )
 
     def _handle_final_response(self, state: RunState,
-                               content: str) -> Generator[Event, None, None]:
+                               content: str,
+                               already_streamed: bool = False) -> Generator[Event, None, None]:
         messages = state.messages
         messages.append({"role": "assistant", "content": content})
-        yield TextEvent(content=content)
+        if not already_streamed:
+            yield TextEvent(content=content)
 
         stop_result = self.harness.run_stop_check(state.user_question, messages)
         if stop_result and not state.stop_hook_active:
@@ -229,15 +233,78 @@ class QueryLoop:
             resp_summary += f"\nLLM文本: {msg.content[:300]}"
         return DebugEvent(stage="response", content=resp_summary)
 
-    def _extract_reasoning_content(self, msg) -> str:
+    def _consume_llm_response(self, response) -> Generator[Event, None, SimpleNamespace]:
+        if hasattr(response, "choices") and response.choices:
+            msg = response.choices[0].message
+            msg.content_streamed = False
+            yield self._build_response_debug_event(msg)
+            if reasoning := self._extract_reasoning_from_message(msg):
+                yield ReasoningEvent(content=reasoning)
+            return msg
+
+        content_parts: list[str] = []
+        reasoning_chars = 0
+        tool_call_parts: dict[int, dict] = {}
+
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if reasoning_delta := self._extract_reasoning_from_message(delta):
+                remaining = MAX_REASONING_CHARS - reasoning_chars
+                if remaining > 0:
+                    emitted = reasoning_delta[:remaining]
+                    reasoning_chars += len(emitted)
+                    yield ReasoningEvent(content=emitted)
+                    if len(reasoning_delta) > remaining:
+                        yield ReasoningEvent(content="\n[... reasoning 已截断]")
+                        reasoning_chars = MAX_REASONING_CHARS
+
+            if delta.content:
+                content_parts.append(delta.content)
+                yield TextEvent(content=delta.content)
+
+            for tc_delta in delta.tool_calls or []:
+                index = tc_delta.index
+                entry = tool_call_parts.setdefault(
+                    index,
+                    {"id": "", "type": "function", "name": "", "arguments": []},
+                )
+                if tc_delta.id:
+                    entry["id"] = tc_delta.id
+                if tc_delta.type:
+                    entry["type"] = tc_delta.type
+                if tc_delta.function:
+                    if tc_delta.function.name:
+                        entry["name"] = tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        entry["arguments"].append(tc_delta.function.arguments)
+
+        msg = SimpleNamespace(
+            content="".join(content_parts),
+            content_streamed=bool(content_parts),
+            tool_calls=[
+                SimpleNamespace(
+                    id=entry["id"],
+                    type=entry["type"],
+                    function=SimpleNamespace(
+                        name=entry["name"],
+                        arguments="".join(entry["arguments"]),
+                    ),
+                )
+                for _, entry in sorted(tool_call_parts.items())
+                if entry["name"]
+            ] or None,
+        )
+        yield self._build_response_debug_event(msg)
+        return msg
+
+    def _extract_reasoning_from_message(self, msg) -> str:
         # llama-server exposes reasoning as an OpenAI-compatible extra field.
         reasoning = getattr(msg, "reasoning_content", None)
         if not reasoning:
             extra = getattr(msg, "model_extra", None) or {}
             reasoning = extra.get("reasoning_content")
-        if not reasoning:
-            return ""
-        reasoning = str(reasoning)
-        if len(reasoning) <= MAX_REASONING_CHARS:
-            return reasoning
-        return reasoning[:MAX_REASONING_CHARS] + f"\n[... reasoning 已截断，原始长度 {len(reasoning)} 字符]"
+        return str(reasoning) if reasoning else ""
