@@ -171,30 +171,13 @@ class Agent:
 
     def _run_loop(self, messages: list[dict], session_id: str) -> Generator[Event, None, None]:
         tools = self.harness.build_tools()
-        recent_calls: list[str] = []
-        loop_warnings: int = 0
+        call_counts: dict[str, int] = {}
 
         for turn in range(self.harness.config.max_turns):
             if turn > 0 and turn % 5 == 0:
                 messages, compacted = self.harness.maybe_compact(messages)
                 if compacted:
                     yield CompactEvent()
-
-            if len(recent_calls) >= 3 and len(set(recent_calls[-3:])) == 1:
-                loop_warnings += 1
-                fn = recent_calls[-1]
-                if loop_warnings >= 2:
-                    messages.append({
-                        "role": "system",
-                        "content": f"[循环终止] 你已经连续多次调用 {fn}，每次都成功返回了相同的数据。数据获取没有问题，你已经拥有了 {fn} 返回的全部信息。请直接基于已获取的数据继续执行下一步操作，不要再调用 {fn}。",
-                    })
-                    recent_calls.clear()
-                else:
-                    messages.append({
-                        "role": "system",
-                        "content": f"[提示] 你已经连续调用 {fn} 3 次，每次返回的数据相同。{fn} 已成功执行，数据已获取。请检查之前的返回结果，然后调用下一个工具继续流程。",
-                    })
-                    recent_calls.clear()
 
             response = call_llm_with_retry(
                 self.client,
@@ -233,7 +216,21 @@ class Agent:
             ]
 
             for tc, _ in tool_calls_parsed:
-                recent_calls.append(tc.function.name)
+                fn = tc.function.name
+                call_counts[fn] = call_counts.get(fn, 0) + 1
+                if call_counts[fn] == 3:
+                    messages.append({
+                        "role": "system",
+                        "content": f"[提示] {fn} 已成功调用 3 次，数据已获取。请基于已有结果调用其他工具继续流程，不要再调用 {fn}。",
+                    })
+                elif call_counts[fn] >= 5:
+                    for tc_b, _ in tool_calls_parsed:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_b.id,
+                            "content": f'{{"blocked": true, "reason": "{tc_b.function.name} 已调用 {call_counts.get(tc_b.function.name, 0)} 次，数据已充分获取。请直接基于已有数据给出回答。"}}',
+                        })
+                    break
 
             if len(tool_calls_parsed) > 1:
                 from concurrent.futures import ThreadPoolExecutor
