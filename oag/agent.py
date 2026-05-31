@@ -12,7 +12,7 @@ from .harness import Harness
 from .loop.confirmation_flow import ConfirmationFlow
 from .loop.query_loop import QueryLoop
 from .runtime import PendingConfirmation, RunState
-from .session_store import SessionStore
+from .runtime.session_store import SessionStore
 
 
 class Agent:

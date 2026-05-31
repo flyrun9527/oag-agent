@@ -9,7 +9,7 @@ from .registry import FunctionRegistry
 from .rules import RuleEngine
 from .schema import Ontology
 from .store import Store
-from .tools.registry import ToolDef, ToolPolicy, ToolRegistry
+from ..tools.registry import ToolDef, ToolPolicy, ToolRegistry
 
 logger = logging.getLogger(__name__)
 

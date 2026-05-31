@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from oag.confirmation_flow import ConfirmationFlow
 from oag.harness import Harness, HarnessConfig
-from oag.query_loop import QueryLoop
-from oag.registry import FunctionRegistry
+from oag.loop.confirmation_flow import ConfirmationFlow
+from oag.loop.query_loop import QueryLoop
+from oag.loop.tool_executor import ToolExecutor
+from oag.ontology.registry import FunctionRegistry
 from oag.runtime import PendingConfirmation, RunState, ToolUseContext
-from oag.schema import FunctionDef, FunctionParam, Ontology, ObjectTypeDef, PropertyDef
-from oag.session_store import SessionStore
-from oag.store import Store
-from oag.tool_executor import ToolExecutor
+from oag.ontology.schema import FunctionDef, FunctionParam, Ontology, ObjectTypeDef, PropertyDef
+from oag.runtime.session_store import SessionStore
+from oag.ontology.store import Store
 
 
 class DummyClient:

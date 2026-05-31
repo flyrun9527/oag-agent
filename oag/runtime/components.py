@@ -6,13 +6,13 @@ from typing import Callable
 from openai import OpenAI
 
 from ..context import ContextManager
-from ..data_executor import DataExecutor
 from ..hooks import AuditLog, HookRegistry, audit_log_hook, business_review_hook, write_confirmation_hook
-from ..ontology_runtime import OntologyRuntime
-from ..registry import FunctionRegistry
-from ..rules import RuleEngine
-from ..schema import Ontology
-from ..store import Store
+from ..ontology.data_executor import DataExecutor
+from ..ontology.registry import FunctionRegistry
+from ..ontology.rules import RuleEngine
+from ..ontology.runtime import OntologyRuntime
+from ..ontology.schema import Ontology
+from ..ontology.store import Store
 from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools

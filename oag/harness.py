@@ -8,9 +8,9 @@ from .runtime import HarnessConfig, ToolUseContext
 from .runtime.components import build_harness_components
 from .tools.pipeline import ToolResult
 from .worker import run_workers_parallel
-from .registry import FunctionRegistry
-from .schema import Ontology
-from .store import Store
+from .ontology.registry import FunctionRegistry
+from .ontology.schema import Ontology
+from .ontology.store import Store
 
 logger = logging.getLogger(__name__)
 

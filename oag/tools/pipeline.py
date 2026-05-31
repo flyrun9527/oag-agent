@@ -6,7 +6,7 @@ from typing import Callable
 
 from ..context import truncate_tool_result
 from ..hooks import AuditLog, HookRegistry, HookResult
-from ..ontology_runtime import OntologyRuntime
+from ..ontology.runtime import OntologyRuntime
 from ..runtime import ToolUseContext, TraceRecorder
 from .registry import ToolDef, ToolRegistry
 
