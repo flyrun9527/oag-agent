@@ -8,9 +8,9 @@ from openai import OpenAI
 from .events import (
     Event, TextEvent, event_to_dict,
 )
-from .confirmation_flow import ConfirmationFlow
 from .harness import Harness
-from .query_loop import QueryLoop
+from .loop.confirmation_flow import ConfirmationFlow
+from .loop.query_loop import QueryLoop
 from .runtime import PendingConfirmation, RunState
 from .session_store import SessionStore
 

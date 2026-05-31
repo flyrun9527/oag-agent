@@ -233,7 +233,7 @@ def test_query_loop_records_final_response_transition(monkeypatch):
             ],
         )
 
-    monkeypatch.setattr("oag.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
     pending = []
     loop = QueryLoop(
         harness,
