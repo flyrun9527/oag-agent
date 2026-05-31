@@ -1,3 +1,9 @@
+"""并行 Worker 智能体。
+
+Worker 用于执行彼此独立的子任务：它只能看到父任务显式传入的 context，并且
+会使用经过过滤的工具列表。所有工具调用仍然经过 Harness 策略约束。
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,26 +12,11 @@ from typing import Any, TYPE_CHECKING
 
 from openai import OpenAI
 
-from .retry import call_llm_with_retry
+from ..llm.retry import call_llm_with_retry
+from ..runtime import ToolUseContext
 
 if TYPE_CHECKING:
-    from .harness import Harness
-
-WORKER_SYSTEM_TEMPLATE = """\
-你是 Worker {worker_id}，负责执行一个具体子任务。
-
-## 领域: {domain}
-
-## 背景信息（主 Agent 已获取）
-{context}
-
-## 可用工具
-你只需使用以下工具完成任务，不要调用无关工具。
-
-## 要求
-- 直接执行任务，不要重复查询主 Agent 已提供的信息
-- 完成后用 1-3 句话总结关键结果
-- 包含具体数据（等级、数值、状态）"""
+    from ..harness import Harness
 
 TOOL_ALLOWLIST: dict[str, set[str]] = {
     "inspect": {"inspect_facility", "inspect", "query", "lookup_damage_grade", "apply_rule"},
@@ -76,11 +67,7 @@ class Worker:
         self.context = context
 
     def run(self, task: str) -> dict:
-        system = WORKER_SYSTEM_TEMPLATE.format(
-            worker_id=self.worker_id,
-            domain=self.harness.ontology.description or self.harness.ontology.name,
-            context=self.context or "(无)",
-        )
+        system = self.harness.build_worker_system_prompt(self.worker_id, self.context)
 
         all_tools = self.harness.build_tools()
         tools = _filter_tools(all_tools, task)
@@ -122,8 +109,20 @@ class Worker:
             })
 
             for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments)
-                result = self.harness.execute_tool(tc.function.name, args, confirmed=True)
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(args, dict):
+                        raise ValueError("工具参数必须是 JSON object")
+                    result = self.harness.execute_tool(
+                        tc.function.name,
+                        args,
+                        context=ToolUseContext(source="worker", confirmed=False),
+                    )
+                except (json.JSONDecodeError, ValueError) as exc:
+                    args = {}
+                    result = SimpleToolResult(
+                        json.dumps({"error": f"工具参数无效: {exc}"}, ensure_ascii=False)
+                    )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -138,6 +137,11 @@ class Worker:
             "tool_calls": tool_calls_log,
             "status": "max_turns",
         }
+
+
+class SimpleToolResult:
+    def __init__(self, content: str):
+        self.content = content
 
 
 def run_workers_parallel(harness: Any, llm_client: OpenAI, model: str,

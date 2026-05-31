@@ -1,3 +1,9 @@
+"""对话上下文管理。
+
+本模块负责估算消息长度、截断过大的工具结果，并在上下文过长时压缩历史。
+压缩时会尽量保留 system prompt 和最近若干轮，旧消息才会被摘要。
+"""
+
 from __future__ import annotations
 
 import json
@@ -58,6 +64,7 @@ class ContextManager:
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         token_count = count_messages_tokens(messages)
 
+        # 先尝试本地轻量压缩，避免不必要的 LLM 摘要调用。
         if token_count >= self.micro_threshold and token_count < self.compact_threshold:
             messages = self._micro_compact(messages)
             if count_messages_tokens(messages) < self.micro_threshold:
@@ -73,15 +80,17 @@ class ContextManager:
         if len(messages) <= 4:
             return messages, False
 
-        recent_count = min(6, len(messages) - 1)
         system_msg = messages[0] if messages[0].get("role") == "system" else None
         start = 1 if system_msg else 0
-        old_messages = messages[start:-recent_count]
-        recent_messages = messages[-recent_count:]
+        split_index = max(start, len(messages) - min(6, len(messages) - 1))
+        split_index = self._adjust_split_for_tool_pairs(messages, split_index, start)
+        old_messages = messages[start:split_index]
+        recent_messages = messages[split_index:]
 
         if not old_messages:
             return messages, False
 
+        # system prompt 是长期约束，压缩时只摘要旧对话，不改写 system prompt。
         summary = self._summarize(old_messages)
         compacted = []
         if system_msg:
@@ -98,6 +107,36 @@ class ContextManager:
 
         return compacted, True
 
+    def force_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
+        messages = self._micro_compact(messages)
+        if len(messages) <= 4:
+            return messages, False
+
+        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        start = 1 if system_msg else 0
+        split_index = max(start, len(messages) - min(4, len(messages) - 1))
+        split_index = self._adjust_split_for_tool_pairs(messages, split_index, start)
+
+        old_messages = messages[start:split_index]
+        recent_messages = messages[split_index:]
+        if not old_messages:
+            return messages, False
+
+        summary = self._summarize(old_messages)
+        compacted = []
+        if system_msg:
+            compacted.append(system_msg)
+        compacted.append({
+            "role": "user",
+            "content": f"[前置对话摘要]\n{summary}",
+        })
+        compacted.append({
+            "role": "assistant",
+            "content": "好的，我已了解前面的对话内容。请继续。",
+        })
+        compacted.extend(recent_messages)
+        return compacted, True
+
     def _micro_compact(self, messages: list[dict]) -> list[str]:
         tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
         protect = set(tool_indices[-3:]) if len(tool_indices) >= 3 else set(tool_indices)
@@ -112,6 +151,41 @@ class ContextManager:
                     "content": content[:200] + "\n[... 结果已压缩]",
                 }
         return messages
+
+    def _adjust_split_for_tool_pairs(self, messages: list[dict],
+                                     split_index: int,
+                                     min_index: int) -> int:
+        needed_ids = {
+            m.get("tool_call_id")
+            for m in messages[split_index:]
+            if m.get("role") == "tool" and m.get("tool_call_id")
+        }
+        if not needed_ids:
+            return split_index
+
+        present_ids = self._assistant_tool_call_ids(messages[split_index:])
+        missing_ids = needed_ids - present_ids
+        adjusted = split_index
+
+        for i in range(split_index - 1, min_index - 1, -1):
+            if not missing_ids:
+                break
+            ids = self._assistant_tool_call_ids([messages[i]])
+            if ids & missing_ids:
+                adjusted = i
+                missing_ids -= ids
+
+        return adjusted
+
+    def _assistant_tool_call_ids(self, messages: list[dict]) -> set[str]:
+        ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []) or []:
+                if isinstance(tc, dict) and tc.get("id"):
+                    ids.add(tc["id"])
+        return ids
 
     def _summarize(self, messages: list[dict]) -> str:
         history_parts = []

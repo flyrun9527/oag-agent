@@ -1,3 +1,9 @@
+"""流式事件类型。
+
+Agent.chat_stream 产出这些 dataclass 事件；chat_stream_sse 会把它们转换成
+web 前端更容易消费的 dict。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -50,6 +56,19 @@ class QuestionEvent(Event):
     question: str = ""
     options: list[dict] = field(default_factory=list)
     multi_select: bool = False
+
+
+@dataclass
+class DebugEvent(Event):
+    type: str = "debug"
+    stage: str = ""
+    content: str = ""
+
+
+@dataclass
+class ReasoningEvent(Event):
+    type: str = "reasoning"
+    content: str = ""
 
 
 def event_to_dict(event: Event) -> dict:
