@@ -8,9 +8,10 @@ __all__ = [
     "DataExecutor",
     "FunctionRegistry",
     "Ontology",
+    "ObjectRepository",
     "OntologyRuntime",
     "RuleEngine",
-    "Store",
+    "SqliteTableAdapter",
     "load_domain",
 ]
 
@@ -28,6 +29,10 @@ def __getattr__(name: str):
         from .schema import Ontology
 
         return Ontology
+    if name == "ObjectRepository":
+        from .repository import ObjectRepository
+
+        return ObjectRepository
     if name == "OntologyRuntime":
         from .runtime import OntologyRuntime
 
@@ -36,10 +41,10 @@ def __getattr__(name: str):
         from .rules import RuleEngine
 
         return RuleEngine
-    if name == "Store":
-        from .store import Store
+    if name == "SqliteTableAdapter":
+        from .adapters.sqlite_table import SqliteTableAdapter
 
-        return Store
+        return SqliteTableAdapter
     if name == "load_domain":
         from .loader import load_domain
 

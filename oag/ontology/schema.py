@@ -26,11 +26,21 @@ class ObjectConstraint(BaseModel):
     reason: str = ""
 
 
+class ObjectSourceDef(BaseModel):
+    type: str = "table"  # table / resolver / json / http / sql
+    table: str = ""
+    resolver: str = ""
+    id_field: str = ""
+    capabilities: list[str] = []
+    config: dict[str, Any] = {}
+
+
 class ObjectTypeDef(BaseModel):
     kind: str = "entity"  # entity / rule_table / lookup_table / config
     description: str = ""
     summary: str = ""
     properties: dict[str, PropertyDef] = {}
+    source: ObjectSourceDef | None = None
     status_transitions: dict[str, list[str]] = {}
     excluded_functions: list[str] = []
     constraints: list[ObjectConstraint] = []
@@ -144,6 +154,10 @@ class Ontology(BaseModel):
         return None
 
     def table_name(self, object_type: str) -> str:
+        obj = self.objects.get(object_type)
+        if obj and obj.source and obj.source.table:
+            return obj.source.table
+
         result = []
         for i, ch in enumerate(object_type):
             if ch.isupper() and i > 0:

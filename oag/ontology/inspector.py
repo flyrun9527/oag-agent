@@ -77,6 +77,7 @@ class OntologyInspector:
                 "object_kind": obj.kind,
                 "summary": obj.summary,
                 "description": obj.description,
+                "source": obj.source.model_dump() if obj.source else {"type": "table"},
                 "data_source": obj.data_source,
                 "mutability": obj.mutability,
                 "properties": {

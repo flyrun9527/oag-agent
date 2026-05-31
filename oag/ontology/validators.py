@@ -10,16 +10,17 @@ import json
 from typing import Any
 
 from .registry import FunctionRegistry
+from .repository import ObjectRepository
 from .schema import Ontology
-from .store import Store
 
 
 class OntologyValidator:
     """Enforces ontology constraints before tools mutate or depend on data."""
 
-    def __init__(self, ontology: Ontology, store: Store, registry: FunctionRegistry):
+    def __init__(self, ontology: Ontology, data: ObjectRepository,
+                 registry: FunctionRegistry):
         self.ontology = ontology
-        self.store = store
+        self.store = data
         self.registry = registry
 
     def check_constraints(self, tool_name: str, args: dict) -> str | None:

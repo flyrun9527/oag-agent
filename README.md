@@ -49,6 +49,11 @@ objects:
   Asset:
     summary: 资产基础信息
     mutability: read_only
+    source:
+      type: json_file
+      id_field: asset_id
+      config:
+        path: data/assets.json
     properties:
       asset_id:
         type: str
@@ -61,6 +66,10 @@ objects:
   WorkOrder:
     summary: 工单
     mutability: mutable
+    source:
+      type: resolver
+      resolver: work_orders
+      id_field: order_id
     properties:
       order_id:
         type: str
@@ -101,24 +110,37 @@ functions:
 `functions/__init__.py` 负责绑定 Python 实现：
 
 ```python
-DATA_FILES = {
-    "Asset": "assets.json",
-}
+class WorkOrderResolver:
+    def __init__(self):
+        self.rows = []
 
-FIELD_MAPPINGS = {}
+    def query(self, filters=None, limit=None, **kw):
+        rows = self.rows
+        for key, value in (filters or {}).items():
+            rows = [row for row in rows if row.get(key) == value]
+        return rows[:limit] if limit else rows
+
+    def query_by_id(self, id_value):
+        rows = self.query({"order_id": id_value}, limit=1)
+        return rows[0] if rows else None
+
+    def insert_record(self, object_type, data):
+        self.rows.append(dict(data))
+        return {"inserted": 1}
 
 
-def register(registry, store, ontology):
+def register(registry, repository, ontology):
     def lookup_asset(asset_id: str):
-        return store.query_by_id("Asset", asset_id) or {"error": "not found"}
+        return repository.query_by_id("Asset", asset_id) or {"error": "not found"}
 
     def create_work_order(asset_id: str):
-        return {
+        return repository.insert_record("WorkOrder", {
             "order_id": "WO-001",
             "asset_id": asset_id,
             "status": "created",
-        }
+        })
 
+    registry.register_resolver("work_orders", WorkOrderResolver())
     registry.register("lookup_asset", lookup_asset, ontology.functions["lookup_asset"])
     registry.register(
         "create_work_order",
@@ -138,7 +160,7 @@ from oag.ontology.loader import load_domain
 from oag.runtime import HarnessConfig
 
 
-ontology, store, registry = load_domain("my_domain")
+ontology, repository, registry = load_domain("my_domain")
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
@@ -147,7 +169,7 @@ client = OpenAI(
 
 harness = Harness(
     ontology=ontology,
-    store=store,
+    repository=repository,
     registry=registry,
     llm_client=client,
     model="your-model",
@@ -211,7 +233,7 @@ Harness
   │   ├─ RuleEngine
   │   ├─ WorkflowRuntime
   │   └─ OntologyToolRegistrar
-  ├─ DataExecutor / Store
+  ├─ DataExecutor / ObjectRepository
   ├─ ToolRegistry
   ├─ ToolExecutionPipeline
   ├─ RuntimeTools
@@ -265,21 +287,42 @@ Harness
 这个拆法的好处是：ontology schema 增长时，不会把所有逻辑塞进一个大 runtime 类里；
 后续要扩展规则、工作流或 prompt 策略，也能在对应模块里改。
 
-### DataExecutor 与 Store
+### DataExecutor、ObjectRepository 与 Adapters
 
-`Store` 是 SQLite 对象存储层，根据 ontology 中的对象定义创建表，提供：
+`DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_links`、
+`mutate`、`search`、`describe`、`pivot`、`distribution` 等工具调用，然后交给
+`ObjectRepository`。
 
-- 对象数据导入。
-- 条件查询、计数、排序、分页。
-- 关系查询。
-- 全文搜索。
-- 创建、更新、删除对象实例。
+`ObjectRepository` 是对象数据访问边界，也是领域函数拿到的数据入口。它不拥有本地
+默认数据库，也不会根据 ontology 自动建表或导入 JSON；每个对象必须通过
+`objects.<name>.source` 明确声明数据来源。Repository 根据 `source.type` 路由到具体
+adapter 或 resolver，并向上提供统一接口：
 
-`DataExecutor` 是工具层调用 `Store` 的适配器。它把工具名和 JSON 参数转换为具体的
-数据操作，并统一把结果序列化为字符串。
+- `query(object_type, filters, limit, order_by, offset)`
+- `count(object_type, filters)`
+- `query_by_id(object_type, id_value)`
+- `query_links(source_type, source_id, link_name)`
+- `search_text(keyword, object_types, limit)`
+- `insert_record / update_record / delete_record`
+- `table_count(object_type)`
 
-领域级校验不放在 `Store`，而是放在 `OntologyValidator`。这样底层存储保持简单，
-面向用户的错误消息和业务约束可以在更靠近工具执行的位置处理。
+内置 adapter：
+
+- `json_file`：`JsonFileAdapter`，每次查询直接读取领域目录下的 JSON 文件。它适合
+  demo、规则表、只读快照和本地文件形式的外部数据，不进入 SQLite。
+- `sqlite_table`：`SqliteTableAdapter`，连接已有 SQLite 数据库中的表或视图。它只做
+  读写查删，不创建表、不迁移 schema、不从 JSON 导入数据。
+
+复杂或非标准数据源用扩展点表达：
+
+- 自定义 adapter：通过 `FunctionRegistry.register_adapter(source_type, factory)` 注册。
+  适合一类可复用数据源，例如 HTTP API、MySQL 表、对象存储文件或运行期内存表。
+- resolver：通过 `FunctionRegistry.register_resolver(name, resolver)` 注册。适合单个对象
+  的定制逻辑，例如多表聚合 SQL、跨 API 组合、图算法结果或业务视图。
+
+Adapter/resolver 的职责是把外部数据源包装成统一对象接口；领域级校验不放在 adapter
+里，而是放在 `OntologyValidator`。这样数据源实现可以保持窄而稳定，面向用户的错误
+消息、可变性和状态流转约束由工具执行管线统一处理。
 
 ### ToolRegistry 与 ToolDef
 

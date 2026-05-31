@@ -14,10 +14,10 @@ from openai import OpenAI
 from ..llm.context import ContextManager
 from ..ontology.data_executor import DataExecutor
 from ..ontology.registry import FunctionRegistry
+from ..ontology.repository import ObjectRepository
 from ..ontology.rules import RuleEngine
 from ..ontology.runtime import OntologyRuntime
 from ..ontology.schema import Ontology
-from ..ontology.store import Store
 from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools
@@ -37,6 +37,7 @@ class HarnessComponents:
     hooks: HookRegistry
     audit: AuditLog
     rule_engine: RuleEngine | None
+    repository: ObjectRepository
     context_mgr: ContextManager
     ont: OntologyRuntime
     data: DataExecutor
@@ -49,7 +50,7 @@ class HarnessComponents:
 
 def build_harness_components(
     ontology: Ontology,
-    store: Store,
+    repository: ObjectRepository,
     registry: FunctionRegistry,
     llm_client: OpenAI,
     model: str,
@@ -61,10 +62,15 @@ def build_harness_components(
 ) -> HarnessComponents:
     hooks = HookRegistry()
     audit = AuditLog()
-    rule_engine = RuleEngine(ontology, store) if ontology.rules else None
+    rule_engine = RuleEngine(ontology, repository, registry) if ontology.rules else None
     context_mgr = ContextManager(llm_client, model)
-    ont = OntologyRuntime(ontology, store, registry, rule_engine)
-    data = DataExecutor(store, registry)
+    ont = OntologyRuntime(
+        ontology,
+        registry,
+        repository=repository,
+        rule_engine=rule_engine,
+    )
+    data = DataExecutor(repository, registry)
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
     trace = TraceRecorder()
@@ -92,6 +98,7 @@ def build_harness_components(
         hooks=hooks,
         audit=audit,
         rule_engine=rule_engine,
+        repository=repository,
         context_mgr=context_mgr,
         ont=ont,
         data=data,

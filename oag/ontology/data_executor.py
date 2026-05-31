@@ -13,13 +13,13 @@ from typing import Any
 import pandas as pd
 
 from .registry import FunctionRegistry
-from .store import Store
+from .repository import ObjectRepository
 
 
 class DataExecutor:
 
-    def __init__(self, store: Store, registry: FunctionRegistry):
-        self.store = store
+    def __init__(self, repository: ObjectRepository, registry: FunctionRegistry):
+        self.store = repository
         self.registry = registry
 
     def execute(self, name: str, args: dict) -> str:

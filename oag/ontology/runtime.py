@@ -12,9 +12,9 @@ from .data_executor import DataExecutor
 from .inspector import OntologyInspector
 from .prompt_builder import OntologyPromptBuilder
 from .registry import FunctionRegistry
+from .repository import ObjectRepository
 from .rules import RuleEngine
 from .schema import Ontology
-from .store import Store
 from .tool_registration import OntologyToolRegistrar
 from .validators import OntologyValidator
 from .workflow_runtime import WorkflowRuntime
@@ -24,16 +24,17 @@ from ..tools.registry import ToolRegistry
 class OntologyRuntime:
     """Facade that wires ontology capabilities into the agent harness."""
 
-    def __init__(self, ontology: Ontology, store: Store,
+    def __init__(self, ontology: Ontology,
                  registry: FunctionRegistry,
+                 repository: ObjectRepository,
                  rule_engine: RuleEngine | None = None):
         self.ontology = ontology
-        self.store = store
+        self.repository = repository
         self.registry = registry
         self.rule_engine = rule_engine
 
         self._prompt_builder = OntologyPromptBuilder(ontology, registry)
-        self._validator = OntologyValidator(ontology, store, registry)
+        self._validator = OntologyValidator(ontology, self.repository, registry)
         self._inspector = OntologyInspector(ontology, registry)
         self._workflow_runtime = WorkflowRuntime(ontology, registry)
         self._tool_registrar = OntologyToolRegistrar(

@@ -10,8 +10,9 @@ import json
 import operator
 from typing import Any, Callable
 
+from .registry import FunctionRegistry
+from .repository import ObjectRepository
 from .schema import Ontology, RuleCondition, RuleDef
-from .store import Store
 
 OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
     "eq": operator.eq,
@@ -83,9 +84,10 @@ def _compile_rule(rule_def: RuleDef) -> Callable[[dict], Any]:
 
 
 class RuleEngine:
-    def __init__(self, ontology: Ontology, store: Store):
+    def __init__(self, ontology: Ontology, data: ObjectRepository,
+                 registry: FunctionRegistry | None = None):
         self.ontology = ontology
-        self.store = store
+        self.store = data
         self._compiled: dict[str, Callable[[dict], Any]] = {}
         self._compile_all()
 

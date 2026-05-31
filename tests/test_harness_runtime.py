@@ -19,17 +19,105 @@ from oag.ontology.schema import (
     FunctionDef,
     FunctionParam,
     Ontology,
+    ObjectSourceDef,
     ObjectTypeDef,
     Precondition,
     PropertyDef,
 )
 from oag.runtime.session_store import SessionStore
-from oag.ontology.store import Store
+from oag.ontology.repository import ObjectRepository
 from oag.tools.registry import ToolDef, ToolPolicy
 
 
 class DummyClient:
     pass
+
+
+class MemoryAdapter:
+    def __init__(self, ontology: Ontology, object_type: str,
+                 source: ObjectSourceDef):
+        self.ontology = ontology
+        self.object_type = object_type
+        self.id_field = source.id_field or ontology.get_id_column(object_type)
+        self.rows: list[dict] = []
+
+    def query(self, object_type, filters=None, limit=None, order_by=None, offset=None):
+        rows = list(self.rows)
+        for key, value in (filters or {}).items():
+            field, op = key.split("__", 1) if "__" in key else (key, "eq")
+            if op == "gte":
+                rows = [row for row in rows if row.get(field) >= value]
+            else:
+                rows = [row for row in rows if row.get(field) == value]
+        if order_by:
+            reverse = order_by.startswith("-")
+            field = order_by.lstrip("-")
+            rows = sorted(rows, key=lambda row: row.get(field), reverse=reverse)
+        if offset:
+            rows = rows[offset:]
+        if limit:
+            rows = rows[:limit]
+        return [dict(row) for row in rows]
+
+    def count(self, object_type, filters=None):
+        return len(self.query(object_type, filters))
+
+    def query_by_id(self, object_type, id_value):
+        if not self.id_field:
+            return None
+        rows = self.query(object_type, {self.id_field: id_value}, limit=1)
+        return rows[0] if rows else None
+
+    def search_text(self, keyword, object_types=None, limit=20):
+        obj_def = self.ontology.objects[self.object_type]
+        text_cols = [name for name, prop in obj_def.properties.items() if prop.type == "str"]
+        results = []
+        for row in self.rows:
+            matched = [col for col in text_cols if row.get(col) and keyword in str(row[col])]
+            if matched:
+                record = dict(row)
+                record["_object_type"] = self.object_type
+                record["_matched_field"] = ", ".join(matched)
+                results.append(record)
+            if len(results) >= limit:
+                break
+        return results
+
+    def insert_record(self, object_type, data):
+        self.rows.append(dict(data))
+        return {"inserted": 1}
+
+    def update_record(self, object_type, id_value, data):
+        updated = 0
+        for row in self.rows:
+            if row.get(self.id_field) == id_value:
+                row.update(dict(data))
+                updated += 1
+                break
+        return {"updated": updated}
+
+    def delete_record(self, object_type, id_value):
+        before = len(self.rows)
+        self.rows = [row for row in self.rows if row.get(self.id_field) != id_value]
+        return {"deleted": before - len(self.rows)}
+
+    def table_count(self, object_type):
+        return len(self.rows)
+
+    def load_data(self, rows):
+        self.rows.extend(dict(row) for row in rows)
+
+
+def make_repository(ontology: Ontology, registry: FunctionRegistry) -> ObjectRepository:
+    registry.register_adapter(
+        "memory",
+        lambda ontology, object_type, source, **kw: MemoryAdapter(
+            ontology,
+            object_type,
+            source,
+        ),
+    )
+    return ObjectRepository(ontology, registry)
 
 
 def make_harness(config: HarnessConfig | None = None) -> Harness:
@@ -40,6 +128,7 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
             "Asset": ObjectTypeDef(
                 summary="Asset summary",
                 description="Asset full description",
+                source=ObjectSourceDef(type="memory", id_field="asset_id"),
                 data_source="external_api",
                 mutability="read_only",
                 properties={
@@ -50,6 +139,7 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
             "WorkOrder": ObjectTypeDef(
                 summary="Work order summary",
                 description="Work order full description",
+                source=ObjectSourceDef(type="memory", id_field="order_id"),
                 data_source="agent_generated",
                 mutability="mutable",
                 properties={
@@ -84,11 +174,9 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
             ),
         },
     )
-    store = Store(ontology)
-    store.create_tables()
-    store.load_data("Asset", [{"asset_id": "A1", "status": "ok"}])
-
     registry = FunctionRegistry()
+    repository = make_repository(ontology, registry)
+    repository.adapter_for("Asset").load_data([{"asset_id": "A1", "status": "ok"}])
     registry.register(
         "lookup_asset",
         lambda asset_id: {"asset_id": asset_id, "status": "ok"},
@@ -102,7 +190,7 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
 
     return Harness(
         ontology,
-        store,
+        repository,
         registry,
         DummyClient(),
         "dummy-model",
@@ -266,6 +354,133 @@ def test_runtime_tools_have_usage_prompts():
     assert "使用说明:" in dispatch_tool["function"]["description"]
     assert "相互独立的只读子任务" in dispatch_tool["function"]["description"]
     assert "不要询问可以通过只读工具直接查到的信息" in ask_tool["function"]["description"]
+
+
+class AssetViewResolver:
+    def __init__(self):
+        self.rows = [
+            {"asset_id": "A1", "event_id": "E1", "status": "ok", "risk": 2},
+            {"asset_id": "A2", "event_id": "E1", "status": "warning", "risk": 8},
+            {"asset_id": "A3", "event_id": "E2", "status": "ok", "risk": 1},
+        ]
+
+    def query(self, object_type, filters=None, limit=None, order_by=None, offset=None):
+        rows = list(self.rows)
+        for key, value in (filters or {}).items():
+            if key.endswith("__gte"):
+                field = key.split("__", 1)[0]
+                rows = [row for row in rows if row.get(field) >= value]
+            else:
+                rows = [row for row in rows if row.get(key) == value]
+        if order_by:
+            reverse = order_by.startswith("-")
+            field = order_by.lstrip("-")
+            rows = sorted(rows, key=lambda row: row.get(field), reverse=reverse)
+        if offset:
+            rows = rows[offset:]
+        if limit:
+            rows = rows[:limit]
+        return rows
+
+
+def make_resolver_harness() -> Harness:
+    ontology = Ontology(
+        name="ResolverDomain",
+        objects={
+            "Event": ObjectTypeDef(
+                source=ObjectSourceDef(type="memory", id_field="event_id"),
+                properties={
+                    "event_id": PropertyDef(type="str", required=True),
+                    "name": PropertyDef(type="str"),
+                },
+            ),
+            "AssetView": ObjectTypeDef(
+                source=ObjectSourceDef(
+                    type="resolver",
+                    resolver="asset_view",
+                    id_field="asset_id",
+                ),
+                data_source="external_api",
+                mutability="read_only",
+                properties={
+                    "asset_id": PropertyDef(type="str", required=True),
+                    "event_id": PropertyDef(type="str"),
+                    "status": PropertyDef(type="str"),
+                    "risk": PropertyDef(type="int"),
+                },
+            ),
+        },
+        links={
+            "event_assets": {
+                "source": "Event",
+                "target": "AssetView",
+                "join": {"source_key": "event_id", "target_key": "event_id"},
+            },
+        },
+    )
+    registry = FunctionRegistry()
+    repository = make_repository(ontology, registry)
+    repository.adapter_for("Event").load_data([{"event_id": "E1", "name": "Flood"}])
+    registry.register_resolver("asset_view", AssetViewResolver())
+    return Harness(
+        ontology,
+        repository,
+        registry,
+        DummyClient(),
+        "dummy-model",
+        HarnessConfig(enable_write_confirmation=False),
+    )
+
+
+def test_resolver_source_supports_query_count_search_and_inspect():
+    harness = make_resolver_harness()
+
+    query_result = json.loads(harness.execute_tool(
+        "query",
+        {"object_type": "AssetView", "filters": {"risk__gte": 5}},
+    ).content)
+    count_result = json.loads(harness.execute_tool(
+        "count",
+        {"object_type": "AssetView", "filters": {"event_id": "E1"}},
+    ).content)
+    search_result = json.loads(harness.execute_tool(
+        "search",
+        {"keyword": "warning", "object_types": ["AssetView"]},
+    ).content)
+    inspect_result = json.loads(harness.execute_tool(
+        "inspect",
+        {"name": "AssetView"},
+    ).content)
+
+    assert [row["asset_id"] for row in query_result] == ["A2"]
+    assert count_result == {"count": 2}
+    assert search_result[0]["_object_type"] == "AssetView"
+    assert search_result[0]["_matched_field"] == "status"
+    assert inspect_result["source"]["type"] == "resolver"
+    assert inspect_result["source"]["resolver"] == "asset_view"
+
+
+def test_repository_query_links_can_cross_table_to_resolver_source():
+    harness = make_resolver_harness()
+
+    result = json.loads(harness.execute_tool(
+        "query_links",
+        {"source_type": "Event", "source_id": "E1", "link_name": "event_assets"},
+    ).content)
+
+    assert [row["asset_id"] for row in result] == ["A1", "A2"]
+
+
+def test_mutating_read_only_resolver_source_is_blocked_before_adapter_write():
+    harness = make_resolver_harness()
+
+    result = harness.execute_tool(
+        "mutate",
+        {"operation": "create", "object_type": "AssetView", "data": {"asset_id": "A4"}},
+    )
+
+    assert result.blocked
+    assert "只读对象" in result.content
 
 
 def test_worker_system_prompt_uses_summary_not_full_context():

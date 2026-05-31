@@ -206,6 +206,13 @@ class OntologyPromptBuilder:
                 lines.append(f"可变性: {obj_def.mutability}")
             if obj_def.data_source:
                 lines.append(f"数据来源: {obj_def.data_source}")
+            if obj_def.source:
+                source_bits = [f"type={obj_def.source.type or 'table'}"]
+                if obj_def.source.resolver:
+                    source_bits.append(f"resolver={obj_def.source.resolver}")
+                if obj_def.source.table:
+                    source_bits.append(f"table={obj_def.source.table}")
+                lines.append(f"数据访问: {', '.join(source_bits)}")
             if obj_def.excluded_functions:
                 lines.append(f"不可调用: {', '.join(obj_def.excluded_functions)}")
             if obj_def.status_transitions:
