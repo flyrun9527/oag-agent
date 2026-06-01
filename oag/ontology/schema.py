@@ -68,6 +68,7 @@ class Precondition(BaseModel):
     field: str
     operator: str = "eq"  # eq / ne / in / exists / not_exists
     value: Any = None
+    value_from_param: str = ""
 
 
 class Effect(BaseModel):

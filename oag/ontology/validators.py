@@ -45,9 +45,10 @@ class OntologyValidator:
                     if not rows:
                         missing.append(f"{pre.object} 不存在任何记录")
                 elif pre.operator == "eq":
-                    rows = self.store.query(pre.object, filters={pre.field: pre.value}, limit=1)
+                    expected = self._precondition_value(pre, args)
+                    rows = self.store.query(pre.object, filters={pre.field: expected}, limit=1)
                     if not rows:
-                        missing.append(f"{pre.object}.{pre.field} 需要为 {pre.value}")
+                        missing.append(f"{pre.object}.{pre.field} 需要为 {expected}")
                 elif pre.operator == "in":
                     found = False
                     for v in (pre.value or []):
@@ -63,6 +64,19 @@ class OntologyValidator:
                     "hint": "请先完成前置步骤",
                 }, ensure_ascii=False)
 
+        return None
+
+    def _precondition_value(self, pre: Any, args: dict) -> Any:
+        raw = getattr(pre, "value", None)
+        if raw is not None:
+            return raw
+        value_from_param = getattr(pre, "value_from_param", None)
+        if value_from_param:
+            return args.get(value_from_param)
+        extra = getattr(pre, "model_extra", None) or {}
+        value_from_param = extra.get("value_from_param")
+        if value_from_param:
+            return args.get(value_from_param)
         return None
 
     def validate_mutate(self, args: dict) -> str | None:
