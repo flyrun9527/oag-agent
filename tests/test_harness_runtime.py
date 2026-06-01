@@ -324,6 +324,31 @@ def test_function_param_schema_rejects_string_for_float():
     assert "threshold 类型错误: 期望 number" in result.content
 
 
+def test_function_tool_errors_are_structured_json():
+    harness = make_harness()
+    harness.data.registry.register(
+        "broken_lookup",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    harness.tools.register(ToolDef(
+        name="broken_lookup",
+        description="Broken lookup",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: harness.data.execute("broken_lookup", args),
+        category="action",
+    ))
+
+    result = harness.execute_tool("broken_lookup", {})
+    payload = json.loads(result.raw_content)
+
+    assert payload == {
+        "error": "函数执行错误",
+        "tool": "broken_lookup",
+        "details": "boom",
+    }
+    assert "函数 broken_lookup 执行出错: 函数执行错误" in result.content
+
+
 def test_prompt_sections_are_layered_and_cached():
     harness = make_harness()
 

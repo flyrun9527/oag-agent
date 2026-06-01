@@ -77,7 +77,11 @@ class DataExecutor:
 
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
         except Exception as e:
-            return json.dumps({"error": f"工具执行错误: {e}"}, ensure_ascii=False)
+            return json.dumps({
+                "error": "工具执行错误",
+                "tool": name,
+                "details": str(e),
+            }, ensure_ascii=False)
 
     def _mutate(self, args: dict) -> str:
         operation = args["operation"]

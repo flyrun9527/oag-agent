@@ -75,4 +75,8 @@ class FunctionRegistry:
                 return json.dumps(result, ensure_ascii=False)
             return str(result)
         except Exception as e:
-            return f"函数执行错误: {e}"
+            return json.dumps({
+                "error": "函数执行错误",
+                "tool": name,
+                "details": str(e),
+            }, ensure_ascii=False)
