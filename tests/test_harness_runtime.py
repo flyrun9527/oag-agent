@@ -1376,3 +1376,60 @@ def test_stop_check_treats_empty_latest_assistant_as_incomplete():
 
     assert result is not None
     assert "未生成最终回答" in result
+
+
+def test_stop_check_blocks_success_claim_after_unhandled_tool_error():
+    harness = make_harness()
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Create work order"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
+        {"role": "assistant", "content": "处理完成，推荐方案如下。"},
+    ]
+
+    result = harness.run_stop_check("Create work order", messages)
+
+    assert result is not None
+    assert "有工具执行出错未处理" in result
+    assert "backend unavailable" in result
+
+
+def test_stop_check_allows_success_after_same_tool_error_is_recovered():
+    harness = make_harness()
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Create work order"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tool_2", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "tool_2", "content": '{"order_id": "WO1"}'},
+        {"role": "assistant", "content": "处理完成，已成功创建工单 WO1，后续可以按该工单继续跟踪执行状态。"},
+    ]
+
+    result = harness.run_stop_check("Create work order", messages)
+
+    assert result is None
+
+
+def test_stop_check_allows_explicit_failure_answer_after_tool_error():
+    harness = make_harness()
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Create work order"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
+        {"role": "assistant", "content": "任务未完成，工具 create_work_order 执行失败，错误为 backend unavailable，需要重试或检查服务状态。"},
+    ]
+
+    result = harness.run_stop_check("Create work order", messages)
+
+    assert result is None
