@@ -457,6 +457,11 @@ Prompt 不再采用“大本体全量前置注入”作为默认模式。默认 
 - `AuditLog`：记录工具调用和结果摘要。
 - `TraceRecorder`：记录 agent turn、工具开始/结束、阻止原因、缓存命中等事件。
 
+每次向 LLM 发起请求前，QueryLoop 会记录 `context_usage` trace 事件。该事件按
+system prompt、工具 schema、消息历史和剩余窗口拆分 token 估算，并列出最大的工具
+schema 与工具结果，便于定位上下文膨胀来源。HTTP 服务同时提供
+`GET /agent/context?session_id=...`，返回当前会话的结构化 context usage 数据。
+
 默认 hook 包括写入确认、审计记录、业务复核和最终回答完整性检查。最终回答检查会识别
 结构化工具结果中的 `error`、`blocked`、`paused` 等状态；如果同一轮对话中存在未被后续
 成功调用恢复的工具错误，模型不能把任务描述成已完成、已成功或已给出可执行建议。明确

@@ -11,6 +11,7 @@ from datetime import datetime
 
 from openai import OpenAI
 
+from .llm.context_usage import collect_context_usage
 from .runtime import HarnessConfig, ToolUseContext
 from .runtime.components import build_harness_components
 from .tools.pipeline import ToolResult
@@ -103,6 +104,15 @@ class Harness:
         self._tools_cache = self.tools.build_tools()
         self._tools_cache_version = self.tools.version
         return self._tools_cache
+
+    def collect_context_usage(self, messages: list[dict],
+                              tools: list[dict] | None = None) -> dict:
+        return collect_context_usage(
+            messages,
+            tools if tools is not None else self.build_tools(),
+            context_window=self.context_mgr.context_window,
+            model=self.context_mgr.model,
+        )
 
     def build_system_prompt(self, domain_context: str = "") -> str:
         sections = self.build_system_prompt_sections(domain_context)

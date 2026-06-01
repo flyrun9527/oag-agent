@@ -12,6 +12,7 @@ from oag.loop.confirmation_flow import ConfirmationFlow
 from oag.loop.query_loop import QueryLoop
 from oag.loop.tool_executor import ToolExecutor
 from oag.llm.context import ContextManager
+from oag.llm.context_usage import collect_context_usage
 from oag.runtime.message_sanitizer import sanitize_messages
 from oag.ontology.registry import FunctionRegistry
 from oag.runtime import PendingConfirmation, RunState, ToolUseContext
@@ -714,6 +715,65 @@ def test_trace_records_jsonl_when_configured(tmp_path):
     assert records[0]["payload"]["tool_name"] == "lookup_asset"
 
 
+def test_context_usage_breaks_down_messages_and_tools():
+    harness = make_harness()
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Question?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "tool_1",
+                "type": "function",
+                "function": {
+                    "name": "lookup_asset",
+                    "arguments": "{\"asset_id\":\"A1\"}",
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "tool_1", "content": "{\"asset_id\":\"A1\",\"status\":\"ok\"}"},
+    ]
+
+    usage = collect_context_usage(
+        messages,
+        harness.build_tools(),
+        context_window=1000,
+        model="dummy-model",
+    )
+
+    assert usage["model"] == "dummy-model"
+    assert usage["context_window"] == 1000
+    assert usage["total_tokens"] > 0
+    assert usage["tools"]["count"] == len(harness.build_tools())
+    assert usage["tools"]["largest_tools"][0]["tokens"] > 0
+    assert usage["messages"]["count"] == len(messages)
+    assert usage["messages"]["tool_call_tokens"] > 0
+    assert usage["messages"]["tool_result_tokens"] > 0
+    assert usage["messages"]["largest_tool_results"][0]["tool_call_id"] == "tool_1"
+    assert {category["name"] for category in usage["categories"]} == {
+        "System prompt",
+        "Tool schemas",
+        "Messages",
+        "Free space",
+    }
+
+
+def test_agent_exposes_session_context_usage(tmp_path):
+    harness = make_harness()
+    agent = Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+    agent.sessions.save("s1", [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Question?"},
+    ])
+
+    usage = agent.get_context_usage("s1")
+
+    assert usage["messages"]["count"] == 2
+    assert usage["tools"]["count"] == len(harness.build_tools())
+    assert usage["total_tokens"] > 0
+
+
 def test_agent_sets_default_trace_jsonl_path(tmp_path):
     harness = make_harness()
 
@@ -952,6 +1012,7 @@ def test_query_loop_records_final_response_transition(monkeypatch):
     assert [event.type for event in events] == ["debug", "debug", "text"]
     assert events[-1].content == "This is a complete final answer for the user."
     assert pending == []
+    assert any(event.event_type == "context_usage" for event in trace_events)
     assert trace_events[-1].event_type == "agent_transition"
     assert trace_events[-1].payload["reason"] == "final_response"
 

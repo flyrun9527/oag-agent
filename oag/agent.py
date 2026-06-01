@@ -113,5 +113,9 @@ class Agent:
             if m["role"] in ("user", "assistant") and m.get("content")
         ]
 
+    def get_context_usage(self, session_id: str) -> dict:
+        messages = self.sessions.get(session_id)
+        return self.harness.collect_context_usage(messages)
+
     def list_sessions(self) -> list[dict]:
         return self.sessions.list_sessions()

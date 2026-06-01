@@ -85,6 +85,7 @@ class QueryLoop:
 
             yield from self._compact_before_request(state)
             messages = state.messages
+            self._record_context_usage(state, tools)
             yield self._build_request_debug_event(state)
 
             try:
@@ -103,6 +104,7 @@ class QueryLoop:
                 if not compacted:
                     raise
                 messages = state.messages
+                self._record_context_usage(state, tools)
                 response = call_llm_with_retry(
                     self.client,
                     model=self.model,
@@ -313,6 +315,24 @@ class QueryLoop:
         if msg.content:
             resp_summary += f"\nLLM文本: {msg.content[:300]}"
         return DebugEvent(stage="response", content=resp_summary)
+
+    def _record_context_usage(self, state: RunState, tools: list[dict]):
+        usage = self.harness.collect_context_usage(state.messages, tools)
+        self.harness.trace.record(
+            "context_usage",
+            session_id=state.session_id,
+            turn_count=state.turn_count,
+            model=usage["model"],
+            total_tokens=usage["total_tokens"],
+            context_window=usage["context_window"],
+            percentage=usage["percentage"],
+            free_tokens=usage["free_tokens"],
+            message_count=usage["messages"]["count"],
+            tool_count=usage["tools"]["count"],
+            categories=usage["categories"],
+            largest_tool_results=usage["messages"]["largest_tool_results"],
+            largest_tools=usage["tools"]["largest_tools"],
+        )
 
     def _consume_llm_response(self, response) -> Generator[Event, None, SimpleNamespace]:
         if hasattr(response, "choices") and response.choices:
