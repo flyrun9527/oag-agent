@@ -13,11 +13,11 @@ from pathlib import Path
 from .adapters.json_file import JsonFileAdapter
 from .adapters.sqlite_table import SqliteTableAdapter
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
 from .schema import Ontology
+from .store import Store
 
 
-def load_domain(domain_dir: str | Path) -> tuple[Ontology, ObjectRepository, FunctionRegistry]:
+def load_domain(domain_dir: str | Path) -> tuple[Ontology, Store, FunctionRegistry]:
     domain_dir = Path(domain_dir).resolve()
 
     ontology = Ontology.load(domain_dir / "ontology.yaml")
@@ -25,9 +25,18 @@ def load_domain(domain_dir: str | Path) -> tuple[Ontology, ObjectRepository, Fun
     registry.register_adapter("json_file", JsonFileAdapter.factory(domain_dir))
     registry.register_adapter("sqlite_table", SqliteTableAdapter.factory(domain_dir))
 
-    repository = ObjectRepository(ontology, registry)
+    repository = Store(ontology, registry)
+    repository.create_tables()
 
     func_pkg = _import_functions(domain_dir / "functions")
+
+    data_dir = domain_dir / "data"
+    data_files = getattr(func_pkg, "DATA_FILES", {})
+    field_mappings = getattr(func_pkg, "FIELD_MAPPINGS", {})
+    for type_name, filename in data_files.items():
+        mapping = field_mappings.get(type_name)
+        repository.load_json_file(type_name, data_dir / filename, mapping)
+
     func_pkg.register(registry, repository, ontology)
 
     return ontology, repository, registry
