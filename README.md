@@ -1,22 +1,20 @@
 # OAG Agent
 
-OAG Agent 是一个本体驱动的在线智能体运行时。它把业务领域定义为
-`ontology.yaml`，再将对象查询、规则执行、工作流推进、业务函数和用户确认
-统一封装为 LLM 可调用的工具。
+OAG Agent 是一个在线智能体运行时。业务领域、本体工具和数据访问由外部
+MCP-style tool provider 提供；Agent 只负责对话循环、工具调用、确认、会话和运行时策略。
 
 这个包本身定位为 Python runtime/library：调用方负责准备领域目录、OpenAI
 兼容客户端、模型名以及外层服务接口。
 
 ## 功能概览
 
-- 基于 `ontology.yaml` 构建领域对象、关系、规则、工作流和业务函数。
-- 自动注册查询、统计、搜索、规则、工作流、写入和业务函数工具。
+- 通过 tool provider 消费查询、统计、搜索、规则、工作流、写入和业务函数工具。
 - 对需要确认的写操作、业务操作和用户提问提供确认流程。
 - 支持流式文本、reasoning 事件、工具调用事件和 SSE 事件转换。
 - 支持长上下文压缩、历史协议修复、工具输入 schema 校验。
 - 支持工具执行超时、Worker 策略限制、大工具结果落盘。
 - 支持通用工具错误守门，避免最终回答掩盖未恢复的工具错误。
-- Prompt 采用分层装配：静态领域摘要常驻，完整本体详情通过 `inspect` 按需获取。
+- Prompt 采用分层装配：领域说明、可用工具和运行时上下文分开维护。
 
 ## 安装与验证
 
@@ -157,11 +155,11 @@ from openai import OpenAI
 
 from oag.agent import Agent
 from oag.harness import Harness
-from oag.ontology.loader import load_domain
 from oag.runtime import HarnessConfig
+from oag.tools import RemoteMcpToolProvider
 
 
-ontology, repository, registry = load_domain("my_domain")
+tool_provider = RemoteMcpToolProvider("http://localhost:8765/mcp")
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
@@ -169,9 +167,7 @@ client = OpenAI(
 )
 
 harness = Harness(
-    ontology=ontology,
-    repository=repository,
-    registry=registry,
+    tool_provider=tool_provider,
     llm_client=client,
     model="your-model",
     config=HarnessConfig(
@@ -200,17 +196,13 @@ for event in agent.confirm_tool("demo", approved=True):
 `Harness.build_system_prompt()` 会组装以下层：
 
 - `base_system_prompt`：领域身份和领域说明。
-- `ontology_summary`：对象、关系、规则、工作流、函数摘要。
+- `tool_summary`：tool provider 暴露的工具摘要。
 - `tool_usage_rules`：通用工具选择规则。
 - `runtime_context`：当前运行模式、审计、轮次限制、部署上下文等动态信息。
 - `append_system_prompt`：调用方追加的部署或业务策略。
 
 默认情况下不会把完整函数和对象定义塞进 system prompt。模型需要详情时应调用
-`inspect` 工具。若要兼容旧行为，可以设置：
-
-```python
-HarnessConfig(include_ontology_full_context=True)
-```
+`inspect` 工具。
 
 ## 架构设计
 
@@ -227,15 +219,8 @@ Agent
   └─ SessionStore
 
 Harness
-  ├─ OntologyRuntime
-  │   ├─ OntologyPromptBuilder
-  │   ├─ OntologyInspector
-  │   ├─ OntologyValidator
-  │   ├─ RuleEngine
-  │   ├─ WorkflowRuntime
-  │   └─ OntologyToolRegistrar
-  ├─ DataExecutor / ObjectRepository
-  ├─ ToolRegistry
+  ├─ ToolProvider
+  ├─ Agent-side ToolRegistry
   ├─ ToolExecutionPipeline
   ├─ RuntimeTools
   ├─ ContextManager
@@ -259,8 +244,8 @@ Harness
 
 ### Harness 层
 
-`Harness` 是模型外侧的执行边界。它把 ontology、工具、上下文管理、hook、trace 和
-执行管线组合起来，并向 `QueryLoop` 暴露少量稳定接口：
+`Harness` 是模型外侧的执行边界。它把 MCP 风格工具 provider、上下文管理、
+hook、trace 和执行管线组合起来，并向 `QueryLoop` 暴露少量稳定接口：
 
 - `build_system_prompt()`
 - `build_tools()`
@@ -273,25 +258,17 @@ Harness
 所有工具调用都必须经过 `Harness.execute_tool()`，从而保证校验、确认、审计、超时、
 缓存和大结果处理不会被绕过。
 
-### OntologyRuntime 层
+### 本体工具服务层
 
-`OntologyRuntime` 是本体能力的 facade。它不直接承载大量逻辑，而是把职责分给几个
-小模块：
-
-- `OntologyPromptBuilder`：构建 prompt 静态层和 ontology 摘要。
-- `OntologyInspector`：按需返回函数、对象、规则的完整定义。
-- `OntologyValidator`：在工具执行前做领域约束校验。
-- `RuleEngine`：执行确定性业务规则。
-- `WorkflowRuntime`：启动、推进工作流，并暴露 SLA 定义。
-- `OntologyToolRegistrar`：把 ontology 能力注册成工具。
-
-这个拆法的好处是：ontology schema 增长时，不会把所有逻辑塞进一个大 runtime 类里；
-后续要扩展规则、工作流或 prompt 策略，也能在对应模块里改。
+本体加载、对象仓库、`DataExecutor`、`OntologyValidator`、`RuleEngine`、
+`WorkflowRuntime` 和 `OntologyToolRegistrar` 不属于 Agent 包。它们由上层应用
+通过 tool provider 暴露给 Agent。Agent 只消费工具 schema、策略元数据和
+`call_tool()` 结果。
 
 ### DataExecutor、ObjectRepository 与 Adapters
 
 `DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_links`、
-`mutate`、`search`、`describe` 等工具调用；开启 `enable_analysis_tools` 后还会接收
+`mutate`、`search`、`describe` 等工具调用；开启本体工具服务的分析工具后还会接收
 `pivot`、`distribution`，然后交给
 `ObjectRepository`。
 
@@ -350,7 +327,7 @@ Adapter/resolver 的职责是把外部数据源包装成统一对象接口；领
 1. 查找工具定义。
 2. 记录 trace。
 3. 校验 JSON 参数 schema。
-4. 执行 ontology 约束校验。
+4. 校验 JSON 参数 schema。
 5. 检查 worker/main、只读、写入、确认等策略。
 6. 命中只读缓存时直接返回。
 7. 触发 pre-hook。
@@ -382,10 +359,8 @@ Adapter/resolver 的职责是把外部数据源包装成统一对象接口；领
 
 ### ConfirmationFlow
 
-写操作、业务操作和 `ask_user` 可能需要暂停等待用户确认。确认策略由工具 policy、
-ontology 中的 `writes_to`、对象 `data_source` 和 `mutability` 共同决定；写入
-`agent_generated + append_only` 对象的新增产物可作为 Agent 中间产物直接执行，更新、
-删除、可变对象、人工/外部来源对象和未知写入目标仍会进入确认。`ConfirmationFlow` 负责：
+写操作、业务操作和 `ask_user` 可能需要暂停等待用户确认。确认策略由工具 policy
+和 provider 暴露的元数据共同决定。`ConfirmationFlow` 负责：
 
 - 处理用户批准或拒绝。
 - 为被拒绝工具写入 tool result，避免破坏 OpenAI tool-call 协议。
@@ -425,13 +400,13 @@ ontology 中的 `writes_to`、对象 `data_source` 和 `mutability` 共同决定
 Prompt 不再采用“大本体全量前置注入”作为默认模式。默认 system prompt 只常驻：
 
 - 领域身份。
-- ontology 摘要。
+- 可用工具摘要。
 - 通用工具规则。
 - 动态运行时上下文。
 - 调用方追加策略。
 
 完整函数、对象、规则详情通过 `inspect` 工具按需获取。这样可以减少 prompt 体积，
-也能避免 ontology 变大后每轮请求都携带大量不相关细节。
+也能避免领域定义变大后每轮请求都携带大量不相关细节。
 
 静态 prompt sections 会缓存；动态 runtime context 每次构建。这样既保持稳定前缀，
 也允许部署信息、运行模式等动态状态及时进入 prompt。
@@ -521,7 +496,7 @@ prompt 更清晰，也更容易按函数维护。
 - `ask_user`
 - `dispatch_workers`
 
-`pivot`、`distribution` 属于可选分析工具，需通过 `HarnessConfig(enable_analysis_tools=True)` 开启。
+`pivot`、`distribution` 属于本体工具服务的可选分析工具，不由 Agent runtime 配置。
 
 实际可用工具取决于 ontology 中是否声明了关系、规则、工作流和业务函数。
 

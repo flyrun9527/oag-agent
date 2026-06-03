@@ -1,8 +1,4 @@
-"""Harness 组件装配入口。
-
-这里是在线执行的 composition root：创建 hooks/audit、OntologyRuntime、
-DataExecutor、ToolRegistry、ToolExecutionPipeline、RuntimeTools 和 TraceRecorder。
-"""
+"""Harness component assembly for the agent package."""
 
 from __future__ import annotations
 
@@ -12,12 +8,7 @@ from typing import Callable
 from openai import OpenAI
 
 from ..llm.context import ContextManager
-from ..ontology.data_executor import DataExecutor
-from ..ontology.registry import FunctionRegistry
-from ..ontology.repository import ObjectRepository
-from ..ontology.rules import RuleEngine
-from ..ontology.runtime import OntologyRuntime
-from ..ontology.schema import Ontology
+from ..tools.provider import ToolProvider, register_provider_tools
 from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools
@@ -36,11 +27,7 @@ DispatchWorkers = Callable[[list[str], str], list[dict]]
 class HarnessComponents:
     hooks: HookRegistry
     audit: AuditLog
-    rule_engine: RuleEngine | None
-    repository: ObjectRepository
     context_mgr: ContextManager
-    ont: OntologyRuntime
-    data: DataExecutor
     tools: ToolRegistry
     cache: dict[str, ToolResult]
     trace: TraceRecorder
@@ -49,9 +36,7 @@ class HarnessComponents:
 
 
 def build_harness_components(
-    ontology: Ontology,
-    repository: ObjectRepository,
-    registry: FunctionRegistry,
+    tool_provider: ToolProvider,
     llm_client: OpenAI,
     model: str,
     config: HarnessConfig,
@@ -62,23 +47,16 @@ def build_harness_components(
 ) -> HarnessComponents:
     hooks = HookRegistry()
     audit = AuditLog()
-    rule_engine = RuleEngine(ontology, repository, registry) if ontology.rules else None
     context_mgr = ContextManager(llm_client, model)
-    ont = OntologyRuntime(
-        ontology,
-        registry,
-        repository=repository,
-        rule_engine=rule_engine,
-        config=config,
-    )
-    data = DataExecutor(repository, registry)
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
     trace = TraceRecorder(jsonl_path=config.trace_jsonl_path)
-    # 工具 handler 尽量保持简单；统一的策略、校验、缓存、审计都在 pipeline 中完成。
+
+    register_provider_tools(tools, tool_provider)
+
     tool_pipeline = ToolExecutionPipeline(
         tools=tools,
-        ontology_runtime=ont,
+        ontology_runtime=None,
         hooks=hooks,
         audit=audit,
         cache=cache,
@@ -91,18 +69,13 @@ def build_harness_components(
         dispatch_workers=dispatch_workers,
     )
 
-    ont.register_tools(tools, data)
     runtime_tools.register(tools)
     register_default_hooks(hooks, config)
 
     return HarnessComponents(
         hooks=hooks,
         audit=audit,
-        rule_engine=rule_engine,
-        repository=repository,
         context_mgr=context_mgr,
-        ont=ont,
-        data=data,
         tools=tools,
         cache=cache,
         trace=trace,

@@ -1,12 +1,13 @@
-"""工具元数据注册表。
+"""Agent-side tool metadata.
 
-ToolDef 同时描述模型可见的函数 schema 和 harness 策略；ToolRegistry 保存
-这些定义，并转换为 OpenAI chat.completions 可用的 tools 规格。
+Agent only needs a transport-neutral view of available tools: schema, handler,
+and execution policy. Ontology-specific tool construction lives outside this
+package and is consumed through a tool provider.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 
@@ -48,9 +49,19 @@ class ToolDef:
             self.is_read_only = self.policy.read_only
             self.requires_confirmation = self.policy.requires_confirmation
 
+    def to_provider_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.parameters,
+            "category": self.category,
+            "read_only": self.is_read_only,
+            "requires_confirmation": self.requires_confirmation,
+            "policy": asdict(self.policy) if self.policy else {},
+        }
+
 
 class ToolRegistry:
-
     def __init__(self):
         self._tools: dict[str, ToolDef] = {}
         self._version = 0
@@ -68,6 +79,9 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
+    def values(self):
+        return self._tools.values()
+
     @property
     def version(self) -> int:
         return self._version
@@ -83,12 +97,12 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
-                    "name": t.name,
-                    "description": self._build_description(t),
-                    "parameters": t.parameters,
+                    "name": tool.name,
+                    "description": self._build_description(tool),
+                    "parameters": tool.parameters,
                 },
             }
-            for t in self._tools.values()
+            for tool in self._tools.values()
         ]
         self._built_tools_version = self._version
         return self._built_tools_cache

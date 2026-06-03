@@ -1,8 +1,4 @@
-"""工具执行管线。
-
-这是每次工具调用的中心策略闸门：worker 权限、mutate 校验、hooks/确认、
-只读缓存、本体约束、结果截断、审计 hook 和 trace 都在这里统一处理。
-"""
+"""Agent-side tool execution pipeline."""
 
 from __future__ import annotations
 
@@ -33,17 +29,28 @@ class ToolPolicyRuntime(Protocol):
     def requires_confirmation(self, tool_name: str, args: dict) -> bool: ...
 
 
+class AllowAllToolPolicyRuntime:
+    def validate_mutate(self, args: dict) -> str | None:
+        return None
+
+    def check_constraints(self, tool_name: str, args: dict) -> str | None:
+        return None
+
+    def requires_confirmation(self, tool_name: str, args: dict) -> bool:
+        return True
+
+
 class ToolExecutionPipeline:
     def __init__(self, *,
                  tools: ToolRegistry,
-                 ontology_runtime: ToolPolicyRuntime,
+                 ontology_runtime: ToolPolicyRuntime | None,
                  hooks: HookRegistry,
                  audit: AuditLog,
                  cache: dict[str, ToolResult],
                  trace: TraceRecorder,
                  set_current_messages: Callable[[list[dict] | None], None]):
         self.tools = tools
-        self.ont = ontology_runtime
+        self.ont = ontology_runtime or AllowAllToolPolicyRuntime()
         self.hooks = hooks
         self.audit = audit
         self.cache = cache
@@ -61,7 +68,6 @@ class ToolExecutionPipeline:
             )
             return ToolResult(content=json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False))
 
-        # 执行顺序很重要：先做便宜的策略/校验，再触发 hooks，最后才执行 handler。
         self.trace.record(
             "tool_start",
             session_id=context.session_id,
@@ -176,7 +182,6 @@ class ToolExecutionPipeline:
         if not (tool.requires_confirmation and not context.confirmed and tool_name == "ask_user"):
             return None
 
-        # ask_user 被建模成“需要确认的工具暂停”，这样 UI 能统一渲染问题并回填答案。
         raw_result = tool.handler(args)
         return ToolResult(
             content=raw_result,

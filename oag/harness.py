@@ -1,7 +1,7 @@
-"""运行时 Harness 门面。
+"""Agent-side Harness.
 
-Harness 是模型外侧的执行边界：构建 prompt 和工具、通过工具管线执行调用、
-持有 hooks/audit/trace，并向对话循环提供压缩和最终回答检查能力。
+The harness owns model prompts, agent runtime tools, confirmation policy, trace,
+and execution flow. Domain tools are supplied through a tool provider.
 """
 
 from __future__ import annotations
@@ -13,26 +13,24 @@ from openai import OpenAI
 
 from .runtime import HarnessConfig, ToolUseContext
 from .runtime.components import build_harness_components
+from .tools.provider import ToolProvider
 from .tools.pipeline import ToolResult
 from .loop.worker import run_workers_parallel
-from .ontology.registry import FunctionRegistry
-from .ontology.repository import ObjectRepository
-from .ontology.schema import Ontology
 
 logger = logging.getLogger(__name__)
 
 
 class Harness:
-    def __init__(self, ontology: Ontology, repository: ObjectRepository,
-                 registry: FunctionRegistry, llm_client: OpenAI,
-                 model: str, config: HarnessConfig | None = None):
-        self.ontology = ontology
+    def __init__(self, tool_provider: ToolProvider, llm_client: OpenAI,
+                 model: str, config: HarnessConfig | None = None,
+                 domain_name: str = "OAG", domain_description: str = ""):
+        self.tool_provider = tool_provider
+        self.domain_name = domain_name
+        self.domain_description = domain_description
         self.config = config or HarnessConfig()
         self._current_messages: list[dict] | None = None
         components = build_harness_components(
-            ontology,
-            repository,
-            registry,
+            tool_provider,
             llm_client,
             model,
             self.config,
@@ -42,11 +40,7 @@ class Harness:
         )
         self.hooks = components.hooks
         self.audit = components.audit
-        self.rule_engine = components.rule_engine
-        self.repository = components.repository
         self.context_mgr = components.context_mgr
-        self.ont = components.ont
-        self.data = components.data
         self.tools = components.tools
         self._cache = components.cache
         self.trace = components.trace
@@ -55,6 +49,10 @@ class Harness:
         self._static_prompt_cache: dict[str, list[str]] = {}
         self._tools_cache_version = -1
         self._tools_cache: list[dict] | None = None
+
+    @property
+    def ontology(self):
+        return _DomainInfo(self.domain_name, self.domain_description)
 
     def register_stop_hook(self, handler):
         self.hooks.register("query_complete", handler)
@@ -104,6 +102,22 @@ class Harness:
         self._tools_cache_version = self.tools.version
         return self._tools_cache
 
+    def list_agent_tools(self) -> list[dict]:
+        from .tools.runtime_tools import RuntimeTools
+        return [
+            tool.to_provider_dict()
+            for tool in self.tools.values()
+            if tool.name in RuntimeTools.RUNTIME_TOOL_NAMES
+        ]
+
+    def list_mcp_tools(self) -> list[dict]:
+        from .tools.runtime_tools import RuntimeTools
+        return [
+            tool.to_provider_dict()
+            for tool in self.tools.values()
+            if tool.name not in RuntimeTools.RUNTIME_TOOL_NAMES
+        ]
+
     def build_system_prompt(self, domain_context: str = "") -> str:
         sections = self.build_system_prompt_sections(domain_context)
         return "\n\n".join(sections)
@@ -114,11 +128,6 @@ class Harness:
         runtime_context = self.build_runtime_context()
         if runtime_context:
             sections.append(runtime_context)
-
-        if self.config.include_ontology_full_context:
-            full_context = self.ont.build_full_context()
-            if full_context:
-                sections.append(full_context)
 
         if self.config.append_system_prompt.strip():
             sections.append(self.config.append_system_prompt.strip())
@@ -132,12 +141,42 @@ class Harness:
         if self.config.custom_system_prompt is not None:
             base = self.config.custom_system_prompt.strip()
             sections = [base] if base else []
-            sections.extend(self.ont.build_static_sections(domain_context)[1:])
+            sections.extend(self._build_mcp_static_sections(domain_context)[1:])
         else:
-            sections = self.ont.build_static_sections(domain_context)
+            sections = self._build_mcp_static_sections(domain_context)
 
         self._static_prompt_cache[domain_context] = list(sections)
         return list(sections)
+
+    def _build_mcp_static_sections(self, domain_context: str = "") -> list[str]:
+        base = f"你是 {self.domain_name} 领域的智能助手。"
+        if self.domain_description:
+            base += f"\n\n## 领域说明\n{self.domain_description}"
+        if domain_context:
+            base += f"\n\n## 额外领域上下文\n{domain_context}"
+
+        tool_lines = []
+        for tool in self.tools.values():
+            if tool.name in {"summarize_progress", "ask_user", "dispatch_workers"}:
+                continue
+            label = f"- {tool.name}[{tool.category}]: {tool.description}"
+            if tool.requires_confirmation:
+                label += " (需要确认)"
+            tool_lines.append(label)
+
+        rules = [
+            "## 工具使用规则",
+            "- 本体数据和领域动作只能通过已注册 MCP 工具访问。",
+            "- 完整函数、对象、规则定义请调用 inspect 获取。",
+            "- 写操作、业务动作或标记为需要确认的工具执行前必须等待用户确认。",
+            "- 不要假设 MCP 工具未返回的数据；需要数据时调用 query/count/search/query_links 等工具。",
+        ]
+
+        return [
+            base,
+            "## 可用 MCP 工具\n" + ("\n".join(tool_lines) if tool_lines else "(无)"),
+            "\n".join(rules),
+        ]
 
     def build_runtime_context(self) -> str:
         lines = [
@@ -146,7 +185,7 @@ class Harness:
             f"- mode: {'write_confirmation' if self.config.enable_write_confirmation else 'no_write_confirmation'}",
             f"- audit: {'enabled' if self.config.enable_audit else 'disabled'}",
             f"- max_turns: {self.config.max_turns}",
-            "- ontology_details: 摘要常驻；完整函数、对象、规则定义请调用 inspect 获取",
+            "- ontology_access: MCP tools only",
         ]
         for key, value in self.config.runtime_context.items():
             clean_key = str(key).strip()
@@ -158,15 +197,14 @@ class Harness:
     def build_worker_system_prompt(self, worker_id: str, context: str = "") -> str:
         sections = [
             f"你是 Worker {worker_id}，负责执行一个具体子任务。",
-            self.ont.build_base_system_prompt(),
-            self.ont.build_ontology_summary(),
+            f"你服务于 {self.domain_name} 领域。",
             "## 背景信息（主 Agent 已获取）\n" + (context or "(无)"),
-            "## 要求\n- 直接执行任务，不要重复查询主 Agent 已提供的信息\n- 需要完整定义时调用 inspect，不要依赖主 Agent 的完整历史\n- 完成后用 1-3 句话总结关键结果\n- 包含具体数据（等级、数值、状态）",
+            "## 要求\n- 直接执行任务，不要重复查询主 Agent 已提供的信息\n- 需要完整定义时调用 inspect\n- 完成后用 1-3 句话总结关键结果\n- 包含具体数据（等级、数值、状态）",
         ]
         return "\n\n".join(section for section in sections if section.strip())
 
     def build_ontology_full_context(self) -> str:
-        return self.ont.build_full_context()
+        return ""
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         return self.context_mgr.maybe_compact(messages)
@@ -186,3 +224,9 @@ class Harness:
                 f"如果回复已完整，直接说'已确认回复完整'即可。否则请补充。"
             )
         return None
+
+
+class _DomainInfo:
+    def __init__(self, name: str, description: str):
+        self.name = name
+        self.description = description

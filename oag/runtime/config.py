@@ -14,6 +14,4 @@ class HarnessConfig:
     custom_system_prompt: str | None = None
     append_system_prompt: str = ""
     runtime_context: dict[str, str] = field(default_factory=dict)
-    include_ontology_full_context: bool = False
-    enable_analysis_tools: bool = False
     trace_jsonl_path: str = ""

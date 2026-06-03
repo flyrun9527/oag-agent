@@ -18,6 +18,8 @@ DispatchWorkers = Callable[[list[str], str], list[dict]]
 
 
 class RuntimeTools:
+    RUNTIME_TOOL_NAMES = frozenset({"summarize_progress", "ask_user", "dispatch_workers"})
+
     def __init__(self, *,
                  context_mgr: ContextManager,
                  get_current_messages: GetMessages,
