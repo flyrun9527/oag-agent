@@ -45,8 +45,29 @@ class SessionStore:
         )
         self.conn.commit()
 
+    def delete(self, session_id: str):
+        self._cache.pop(session_id, None)
+        self.conn.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+        self.conn.commit()
+
     def list_sessions(self) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT session_id, updated_at FROM chat_history ORDER BY updated_at DESC"
+            "SELECT session_id, messages, updated_at FROM chat_history ORDER BY updated_at DESC"
         ).fetchall()
-        return [{"session_id": r[0], "updated_at": r[1]} for r in rows]
+        results: list[dict] = []
+        for session_id, raw_messages, updated_at in rows:
+            preview = ""
+            try:
+                messages = json.loads(raw_messages)
+                for m in messages:
+                    if m.get("role") == "user" and m.get("content"):
+                        preview = m["content"][:80]
+                        break
+            except (json.JSONDecodeError, TypeError):
+                pass
+            results.append({
+                "session_id": session_id,
+                "updated_at": updated_at,
+                "preview": preview,
+            })
+        return results
